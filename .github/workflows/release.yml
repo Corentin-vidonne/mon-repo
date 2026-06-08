@@ -21,7 +21,37 @@ permissions:
   contents: read
 
 jobs:
+  # Pre-create the draft GitHub Release, on purpose WITHOUT a target_commitish.
+  #
+  # tauri-action's own release creation always sends `target_commitish=<the tag's commit>`
+  # (see its create-release.ts). When that commit touches `.github/workflows/`, GitHub then
+  # also requires the `workflows: write` permission — which GITHUB_TOKEN can NEVER be granted
+  # — and answers 403 "Resource not accessible by integration". Creating the release here with
+  # `gh` (which sends no target_commitish) avoids that check; tauri-action then simply finds
+  # this draft by tag and uploads the bundles to it instead of creating it itself.
+  create-release:
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Create the draft release if it does not exist yet
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          if gh api "repos/$GITHUB_REPOSITORY/releases" --jq '.[].tag_name' | grep -qx "$TAG"; then
+            echo "Release for $TAG already exists — reusing it."
+          else
+            gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
+              -f tag_name="$TAG" \
+              -f name="gitui $TAG" \
+              -f body="Téléchargez l'installateur correspondant à votre système ci-dessous." \
+              -F draft=true >/dev/null
+            echo "Created draft release for $TAG."
+          fi
+
   build:
+    needs: create-release
     permissions:
       contents: write
     strategy:
@@ -91,10 +121,11 @@ jobs:
   # Arch can't install the .deb/.rpm produced above, so we build a real pacman package
   # inside an Arch container: compile the release binary, then wrap the prebuilt artifacts
   # with packaging/arch/PKGBUILD via makepkg (which refuses to run as root — hence the
-  # throwaway `builder` user). `needs: build` guarantees the draft release already exists,
-  # so we just attach the package to it with `gh`.
+  # throwaway `builder` user). `needs: create-release` guarantees the draft release exists
+  # (and decouples this from the matrix, so a flaky macOS DMG bundle can't block it); we just
+  # attach the package to it with `gh`.
   arch:
-    needs: build
+    needs: create-release
     permissions:
       contents: write
     runs-on: ubuntu-latest
