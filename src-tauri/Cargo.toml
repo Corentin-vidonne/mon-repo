@@ -37,4 +37,9 @@ base64 = "0.22"
 ureq = { version = "2", default-features = false }
 # URL parsing/validation for the user-supplied Ollama host (SSRF / exfiltration guard).
 url = "2"
+# App self-update. native-tls (OS TLS: SChannel / Secure Transport / openssl) instead of the
+# default rustls-tls, whose crypto provider needs a C toolchain (clang) — this keeps Windows &
+# macOS dev/CI builds toolchain-free. `zip` (kept from the defaults) extracts update archives.
+tauri-plugin-updater = { version = "2.10.1", default-features = false, features = ["native-tls", "zip"] }
+tauri-plugin-process = "2.3.1"
 

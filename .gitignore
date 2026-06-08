@@ -22,3 +22,6 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Tauri updater signing key — the PRIVATE key must never be committed
+*.key

@@ -151,6 +151,8 @@ export const api = {
     invoke<string>("read_markdown", { path, rel }),
   createMarkdown: (path: string, branch: string, rel: string, content: string) =>
     invoke<RepoView>("create_markdown", { path, branch, rel, content }),
+  /** Whether this install self-updates via the Tauri updater, or only notifies (package-manager installs). */
+  updateChannel: () => invoke<"updater" | "manager">("update_channel"),
 };
 
 /** Tauri command errors come back as `{ message }`; extract a readable string. */

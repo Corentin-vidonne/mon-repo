@@ -15,6 +15,19 @@ mod stack;
 mod term;
 mod undo;
 
+/// Which update mechanism this install supports. Windows/macOS bundles and the Linux
+/// AppImage self-update via the Tauri updater ("updater"); a .deb/.rpm/pacman install does
+/// not (no `APPIMAGE` env), so the UI only notifies and points at the package manager
+/// ("manager"). Read by the frontend `AppUpdateBanner`.
+#[tauri::command]
+fn update_channel() -> &'static str {
+    if cfg!(target_os = "linux") && std::env::var_os("APPIMAGE").is_none() {
+        "manager"
+    } else {
+        "updater"
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     // Repair PATH before anything shells out, so `git`/`gh`/`claude` resolve even when
@@ -25,6 +38,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_notification::init())
+        .plugin(tauri_plugin_updater::Builder::new().build())
+        .plugin(tauri_plugin_process::init())
         .manage(term::Terminals::default())
         .manage(chat::ChatSessions::default())
         .invoke_handler(tauri::generate_handler![
@@ -86,6 +101,7 @@ pub fn run() {
             commands::list_markdown,
             commands::read_markdown,
             commands::create_markdown,
+            update_channel,
             term::term_open_analyze,
             term::term_open_analyze_pr,
             term::term_open_merge_assist,
