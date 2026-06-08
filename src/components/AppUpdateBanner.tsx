@@ -6,7 +6,7 @@ import { DownloadCloud, X } from "lucide-react";
 import { api } from "../lib/api";
 
 // Where package-manager users (deb / rpm / pacman) go to grab the new build.
-const RELEASES_URL = "https://github.com/Corentin-vidonne/mon-repo/releases/latest";
+const RELEASES_URL = "https://github.com/Corentin-vidonne/gitui/releases/latest";
 
 // Top banner shown once a newer release exists. On installs that can self-update (Windows,
 // macOS, Linux AppImage → channel "updater") it offers a one-click download+install+relaunch;
