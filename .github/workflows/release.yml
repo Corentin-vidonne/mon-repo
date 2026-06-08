@@ -42,12 +42,15 @@ jobs:
           if gh api "repos/$GITHUB_REPOSITORY/releases" --jq '.[].tag_name' | grep -qx "$TAG"; then
             echo "Release for $TAG already exists — reusing it."
           else
+            # No default body on purpose: the in-app "what's new" dialog shows the release body
+            # verbatim, so we leave it empty and you write the user-facing notes when publishing.
+            # No notes → empty body → no popup (instead of boilerplate). Re-runs reuse the existing
+            # release, so your notes are never clobbered.
             gh api -X POST "repos/$GITHUB_REPOSITORY/releases" \
               -f tag_name="$TAG" \
               -f name="gitui $TAG" \
-              -f body="Téléchargez l'installateur correspondant à votre système ci-dessous." \
               -F draft=true >/dev/null
-            echo "Created draft release for $TAG."
+            echo "Created draft release for $TAG (empty body — add your notes before publishing)."
           fi
 
   build:
