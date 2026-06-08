@@ -104,6 +104,12 @@ jobs:
       - name: Install frontend dependencies
         run: npm install
 
+      # Derive the bundle version from the tag (v0.2.3 -> 0.2.3) so a plain
+      # `git tag && git push` is enough — no manual version bump. No-op off a tag.
+      - name: Stamp version from the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: node .github/scripts/stamp-version.mjs
+
       - name: Build & bundle
         uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
@@ -145,6 +151,11 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm install
+
+      # Same tag-derived version as the build job, so the .pkg.tar.zst pkgver matches.
+      - name: Stamp version from the tag
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: node .github/scripts/stamp-version.mjs
 
       # `--no-bundle`: we only need the release binary (src-tauri/target/release/gitui);
       # makepkg does the Arch packaging below. Avoids pulling in AppImage/deb/rpm tooling.
