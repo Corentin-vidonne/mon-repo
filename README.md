@@ -89,3 +89,4 @@ src-tauri/src/
   stack/                 topological order + restack engine
   model.rs  error.rs  proc.rs
 ```
+https://github.com/Corentin-vidonne/mon-repo/releases/tag/v0.2.2
