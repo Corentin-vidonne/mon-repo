@@ -4,8 +4,22 @@ use crate::proc;
 use std::path::{Path, PathBuf};
 
 /// Run a git command in `repo`, returning stdout on success.
+///
+/// The analyzed repo is untrusted input (cloned repos / PR branches), so every invocation
+/// blocks the `ext::` transport — a hostile `.gitmodules` could otherwise run a command —
+/// neutralizes the pager, and never hangs on a credentials prompt. (External-diff / textconv
+/// drivers are *not* reachable here: they require local config a clone/PR can't carry, only
+/// `.gitattributes` travels — and setting an empty `diff.external` makes git spawn an empty
+/// program, which breaks normal diffs.)
 pub fn git(repo: &Path, args: &[&str]) -> Result<String> {
-    let r = proc::run("git", args.iter().copied(), Some(repo))?;
+    let mut full: Vec<&str> = vec!["-c", "protocol.ext.allow=never", "-c", "core.pager=cat"];
+    full.extend_from_slice(args);
+    let r = proc::run_env(
+        "git",
+        full.iter().copied(),
+        Some(repo),
+        &[("GIT_TERMINAL_PROMPT", "0")],
+    )?;
     if !r.success {
         return Err(AppError::new(format!(
             "git {} failed: {}",
@@ -40,6 +54,14 @@ pub fn write_working_file(repo: &Path, rel: &str, content: &str) -> Result<()> {
 /// Stage a path (`git add`), marking a conflicted file as resolved.
 pub fn stage_file(repo: &Path, rel: &str) -> Result<()> {
     git(repo, &["add", rel]).map(|_| ())
+}
+
+/// Whether the index holds staged changes relative to HEAD (`git diff --cached --quiet`
+/// exits 0 when there are none). Used to guard the two commits of a line-level split.
+pub fn has_staged_changes(repo: &Path) -> bool {
+    !proc::run("git", ["diff", "--cached", "--quiet"], Some(repo))
+        .map(|r| r.success)
+        .unwrap_or(true)
 }
 
 #[derive(Clone, Debug)]

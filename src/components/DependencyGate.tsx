@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { AlertTriangle, Check, ExternalLink, RefreshCw, X } from "lucide-react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { safeOpen } from "../lib/safeOpen";
 import type { Health } from "../lib/types";
 
 type Tool = {
@@ -118,7 +118,7 @@ export function DependencyGate({
                       </span>
                     ) : (
                       <button
-                        onClick={() => openUrl(t.url)}
+                        onClick={() => safeOpen(t.url)}
                         className="ml-auto inline-flex shrink-0 items-center gap-1 rounded-md bg-indigo-600 px-2 py-1 text-[11px] font-medium text-white hover:bg-indigo-500"
                       >
                         Installer <ExternalLink className="h-3 w-3" />

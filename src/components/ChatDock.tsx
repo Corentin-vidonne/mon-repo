@@ -38,7 +38,7 @@ type ChatItem =
   | { kind: "error"; text: string };
 
 /** A command claude was denied and is asking the user to approve. */
-type Approval = { command: string; patterns: string[] };
+type Approval = { command: string; patterns: string[]; compound: boolean };
 
 function newId(): string {
   return typeof crypto !== "undefined" && "randomUUID" in crypto
@@ -82,6 +82,14 @@ function toolPatterns(d: {
     if (prefix.length) pats.add(`Bash(${prefix.join(" ")}:*)`);
   }
   return pats.size ? [...pats] : [`Bash(${cmd.trim().split(/\s+/)[0]}:*)`];
+}
+
+/** Shell metacharacters that chain or segment a command. Approving a compound command must
+ * never auto-whitelist a tacked-on second verb (`gh pr merge 7 && rm -rf ~`), so we detect
+ * these and require the model to run sub-commands one at a time instead. */
+const COMPOUND_RE = /&&|\|\||;|\||\n|`|\$\(/;
+function isCompound(cmd: string): boolean {
+  return COMPOUND_RE.test(cmd);
 }
 
 function ToolChip({ item }: { item: ToolItem }) {
@@ -153,8 +161,6 @@ export function ChatDock({
   const scrollRef = useRef<HTMLDivElement>(null);
   // Whether a streaming assistant bubble is currently open (for delta accumulation).
   const liveRef = useRef(false);
-  // Command patterns the user approved this session (passed back as --allowedTools).
-  const approvedRef = useRef<string[]>([]);
 
   const mergeMode =
     target.kind === "merge-branches" || (target.kind === "pr" && mode === "merge");
@@ -273,8 +279,12 @@ export function ChatDock({
       const denials = ev.permission_denials;
       if (mergeMode && Array.isArray(denials) && denials.length > 0) {
         const d = denials[0];
-        const command = d.tool_input?.command ?? d.tool_input?.file_path ?? d.tool_name ?? "";
-        setApproval({ command: String(command), patterns: toolPatterns(d) });
+        const command = String(
+          d.tool_input?.command ?? d.tool_input?.file_path ?? d.tool_name ?? ""
+        );
+        const compound =
+          typeof d.tool_input?.command === "string" && isCompound(d.tool_input.command);
+        setApproval({ command, patterns: toolPatterns(d), compound });
       }
       return;
     }
@@ -286,7 +296,6 @@ export function ChatDock({
     let alive = true;
     sessionRef.current = null;
     liveRef.current = false;
-    approvedRef.current = [];
     setItems([]);
     setInput("");
     setApproval(null);
@@ -329,7 +338,7 @@ export function ChatDock({
           source: target.source,
           target: target.target,
           partial: streaming,
-          extraAllowed: approvedRef.current,
+          extraAllowed: [],
         };
       } else if (target.kind === "pr" && mode === "merge") {
         cmd = "chat_open_merge_pr";
@@ -338,7 +347,7 @@ export function ChatDock({
           path: repoPath,
           number: target.number,
           partial: streaming,
-          extraAllowed: approvedRef.current,
+          extraAllowed: [],
         };
       } else if (target.kind === "pr") {
         cmd = "chat_open_analyze_pr";
@@ -370,7 +379,9 @@ export function ChatDock({
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
   }, [items, running, approval]);
 
-  function sendTurn(text: string) {
+  // `extra` is the one-shot allowlist for THIS turn only (a just-approved command). It is
+  // never persisted, so an approval can't silently widen permissions for later turns.
+  function sendTurn(text: string, extra: string[] = []) {
     if (!sessionRef.current) return;
     setRunning(true);
     invoke("chat_send", {
@@ -379,7 +390,7 @@ export function ChatDock({
       sessionId: sessionRef.current,
       text,
       partial: streaming,
-      extraAllowed: approvedRef.current,
+      extraAllowed: extra,
     }).catch((err) => {
       setItems((it) => [...it, { kind: "error", text: errorText(err) }]);
       setRunning(false);
@@ -396,13 +407,21 @@ export function ChatDock({
 
   function approve() {
     if (!approval) return;
-    const { command, patterns } = approval;
-    for (const p of patterns) {
-      if (!approvedRef.current.includes(p)) approvedRef.current.push(p);
-    }
+    const { command, patterns, compound } = approval;
     setApproval(null);
     setItems((it) => [...it, { kind: "note", text: `✓ Autorisé : ${command}` }]);
-    sendTurn("J'autorise cette commande. Exécute-la maintenant.");
+    if (compound) {
+      // Don't whitelist several sub-commands from one click. Ask the model to run them one
+      // at a time; each individual write then prompts for its own approval.
+      sendTurn(
+        "J'autorise cette opération, mais exécute les commandes UNE PAR UNE — sans `&&`, " +
+          "`;`, `|` ni enchaînement. Lance seulement la première commande maintenant.",
+        []
+      );
+      return;
+    }
+    // Single-turn scope: the allowance is handed to this retry only, never persisted.
+    sendTurn("J'autorise cette commande. Exécute-la maintenant.", patterns);
   }
 
   function refuse() {
@@ -560,6 +579,16 @@ export function ChatDock({
             <pre className="overflow-auto rounded border border-neutral-700 bg-neutral-950 p-2 font-mono text-xs text-amber-300">
               {approval.command}
             </pre>
+            {approval.compound && (
+              <div className="flex items-start gap-2 rounded border border-amber-900 bg-amber-950/40 px-2 py-1.5 text-[11px] text-amber-300">
+                <ShieldAlert className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+                <span>
+                  Commande composée (enchaînement détecté). Si tu autorises, {aiName} sera
+                  invité à exécuter les commandes une par une — chacune devra être autorisée
+                  séparément.
+                </span>
+              </div>
+            )}
             <div className="flex justify-end gap-2 pt-1">
               <button
                 onClick={refuse}

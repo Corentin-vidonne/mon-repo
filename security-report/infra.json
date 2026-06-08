@@ -1,0 +1,114 @@
+{
+  "findings": [
+    {
+      "id": "INFRA-001",
+      "severity": "medium",
+      "title": "Content Security Policy is disabled (csp: null) in the Tauri webview",
+      "file": "src-tauri/tauri.conf.json",
+      "line": 23,
+      "snippet": "\"csp\": null",
+      "description": "app.security.csp is null, so the Tauri webview ships with NO Content Security Policy. For a desktop app this is the equivalent of serving a web page with no security headers: any XSS in the React frontend (e.g. via untrusted git/PR/commit data, AI/Claude output, or Markdown rendering) can load arbitrary remote scripts, exfiltrate data, or reach Tauri IPC commands — turning a frontend injection into potential RCE on the host. The frontend renders attacker-influenceable content (branch names, commit messages, PR titles/bodies, diffs, and LLM output), so a restrictive CSP is an important defense-in-depth control here.",
+      "remediation": "Define an explicit, restrictive CSP. Start from default-src 'self'; for the bundled SPA something like: \"csp\": \"default-src 'self'; img-src 'self' asset: https://asset.localhost data:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost\". Tighten script-src/style-src as the build allows and avoid 'unsafe-inline'/'unsafe-eval'. See https://v2.tauri.app/security/csp/."
+    },
+    {
+      "id": "INFRA-002",
+      "severity": "medium",
+      "title": "GitHub Actions: actions/checkout pinned to a mutable tag (@v4) instead of a commit SHA",
+      "file": ".github/workflows/release.yml",
+      "line": 36,
+      "snippet": "- uses: actions/checkout@v4",
+      "description": "The action is referenced by the mutable major tag @v4. Tags can be moved by the upstream repo (or an attacker who compromises it) to point at malicious code, which would then execute in CI with the job's permissions (contents: write) and access to GITHUB_TOKEN — a supply-chain compromise of the release pipeline that builds and signs the distributed installers.",
+      "remediation": "Pin to a full commit SHA, e.g. uses: actions/checkout@b4ffde65f46336ab88eb53be808477a3936bae11 # v4.1.1 . Use Dependabot (package-ecosystem: github-actions) to keep pinned SHAs updated."
+    },
+    {
+      "id": "INFRA-003",
+      "severity": "medium",
+      "title": "GitHub Actions: actions/setup-node pinned to a mutable tag (@v4)",
+      "file": ".github/workflows/release.yml",
+      "line": 50,
+      "snippet": "uses: actions/setup-node@v4",
+      "description": "Mutable tag @v4 instead of a pinned commit SHA. A retagged or compromised release of this action runs in the release job with contents: write and GITHUB_TOKEN, allowing tampering with build output or the draft release. Supply-chain risk.",
+      "remediation": "Pin to a full commit SHA, e.g. uses: actions/setup-node@1e60f620b9541d16bece96c5465dc8ee9832be0b # v4.0.3 ."
+    },
+    {
+      "id": "INFRA-004",
+      "severity": "medium",
+      "title": "GitHub Actions: dtolnay/rust-toolchain pinned to a branch (@stable)",
+      "file": ".github/workflows/release.yml",
+      "line": 55,
+      "snippet": "uses: dtolnay/rust-toolchain@stable",
+      "description": "@stable is a moving branch ref, not an immutable commit — even less stable than a version tag. Whatever commit the branch points to at run time executes in the privileged release job (contents: write, GITHUB_TOKEN). A compromise or accidental breaking change in that branch directly affects every release build. Supply-chain risk.",
+      "remediation": "Pin to a full commit SHA, e.g. uses: dtolnay/rust-toolchain@<sha> # stable (e.g. the commit the 'stable' branch currently points to). Re-pin periodically via Dependabot or manual review."
+    },
+    {
+      "id": "INFRA-005",
+      "severity": "medium",
+      "title": "GitHub Actions: swatinem/rust-cache pinned to a mutable tag (@v2)",
+      "file": ".github/workflows/release.yml",
+      "line": 61,
+      "snippet": "uses: swatinem/rust-cache@v2",
+      "description": "Mutable tag @v2 instead of a pinned commit SHA. A caching action is especially sensitive: a compromised version could poison the restored Rust build cache or run arbitrary code in the release job (contents: write, GITHUB_TOKEN), tampering with the binaries that are shipped to users. Supply-chain risk.",
+      "remediation": "Pin to a full commit SHA, e.g. uses: swatinem/rust-cache@23bce251a8cd2ffc3c1075eaa2367cf899916d84 # v2.7.3 ."
+    },
+    {
+      "id": "INFRA-006",
+      "severity": "high",
+      "title": "GitHub Actions: tauri-apps/tauri-action pinned to a mutable major tag (@v0)",
+      "file": ".github/workflows/release.yml",
+      "line": 69,
+      "snippet": "uses: tauri-apps/tauri-action@v0",
+      "description": "tauri-action is the most security-critical step in the pipeline: it builds and bundles the per-platform installers and uploads them to the GitHub Release, and it is given GITHUB_TOKEN (contents: write). Referencing it by the mutable @v0 tag means a retagged or compromised release would run with full ability to inject malicious code into the distributed .msi/.exe/.dmg/.AppImage/.deb/.rpm artifacts that end users install — a direct software-supply-chain compromise. Rated higher than the other unpinned actions because it controls the final shipped binaries and the release upload. Pinning by SHA is the only mutable-tag finding here that is itself a higher-severity supply-chain exposure.",
+      "remediation": "Pin to a full commit SHA, e.g. uses: tauri-apps/tauri-action@<sha> # v0.5.x . Combine with code signing (see INFRA-009) so that even a CI compromise produces unsigned/mismatched artifacts that clients can reject."
+    },
+    {
+      "id": "INFRA-007",
+      "severity": "low",
+      "title": "Workflow job grants contents: write for the whole build job across all matrix platforms",
+      "file": ".github/workflows/release.yml",
+      "line": 19,
+      "snippet": "permissions:\n      contents: write",
+      "description": "permissions.contents: write is set on the 'build' job, so every matrix leg (4 runners on macOS/Linux/Windows, every step including third-party actions and 'npm install') receives a GITHUB_TOKEN with write access to repository contents/releases. The write scope is genuinely needed only by the tauri-action step that creates/uploads the draft release. Granting it job-wide widens the blast radius if any earlier step or unpinned action (INFRA-002..006) is compromised. There is no top-level 'permissions:' block, so the default token scope for other (future) jobs is the repository default rather than explicitly least-privilege.",
+      "remediation": "Add a top-level 'permissions: contents: read' as the least-privilege default, and keep contents: write only on the job (or ideally a dedicated release step/job) that actually publishes the release. Consider splitting the build (read-only) and release-upload (write) into separate jobs so only the upload job holds the write token."
+    },
+    {
+      "id": "INFRA-008",
+      "severity": "low",
+      "title": "Release tag name (github.ref_name) flows untrusted into the release without an event-trigger guard",
+      "file": ".github/workflows/release.yml",
+      "line": 73,
+      "snippet": "tagName: ${{ github.ref_name }}",
+      "description": "tagName is taken from github.ref_name (the pushed tag). It is passed as a typed input to tauri-action rather than interpolated into a shell 'run:' block, so classic shell script-injection is not possible here, and pushing a 'v*' tag already requires repo write access — so this is low risk. It is noted for completeness: the value is attacker-influenceable by anyone who can push tags, and is used to name the release. releaseName and releaseBody are static literals (no interpolation), and the only 'run:' steps (apt-get, npm install) contain no ${{ }} expressions, so there is no command-injection finding.",
+      "remediation": "No urgent change required. Optionally validate the tag format (e.g. a guard step that fails if github.ref_name does not match a strict semver pattern ^v[0-9]+\\.[0-9]+\\.[0-9]+) before building, to avoid malformed/spoofed release names. Keep using typed action inputs (never embed github.* directly inside run: scripts)."
+    },
+    {
+      "id": "INFRA-009",
+      "severity": "low",
+      "title": "Bundle ships unsigned artifacts (targets: all, no signing identity / no updater signature path)",
+      "file": "src-tauri/tauri.conf.json",
+      "line": 27,
+      "snippet": "\"targets\": \"all\",",
+      "description": "bundle.targets is 'all' and no code-signing configuration is present: there is no macOS signingIdentity / hardenedRuntime, no Windows certificateThumbprint (bundle.windows.signCommand), and no Tauri updater pubkey anywhere in the repo. The CI workflow likewise passes no signing secrets. Combined with the supply-chain exposure of the unpinned release actions (esp. INFRA-006), this means the installers distributed via the draft GitHub Release are unsigned, so end users (and any future updater) have no cryptographic way to verify they came from this pipeline untampered. This is the desktop-app analog of an unsigned/unverified deployment artifact.",
+      "remediation": "Configure platform code signing for release builds: macOS Developer ID + notarization (bundle.macOS.signingIdentity, hardenedRuntime, entitlements), Windows Authenticode signing (bundle.windows.signCommand or certificateThumbprint), injecting certs via GitHub Actions secrets. If/when auto-update is added, configure the Tauri updater with a minisign pubkey and keep the private key only in CI secrets (never committed)."
+    },
+    {
+      "id": "INFRA-010",
+      "severity": "info",
+      "title": "No container/cloud IaC; the real trust boundary is release-pipeline integrity + Tauri capability scope",
+      "file": ".github/workflows/release.yml",
+      "line": 1,
+      "snippet": "name: release",
+      "description": "gitui is a Tauri v2 desktop app with no Docker, Terraform, Kubernetes, or cloud IaC, so cloud-spec checks (containers running as root/privileged, resource limits, network policies, public S3/GCS buckets, IAM roles) are Not Applicable. The equivalent attack surface / trust boundary for this project is: (1) the GitHub Actions release pipeline that produces the distributed installers — see the unpinned-action and signing findings INFRA-002..006/009; (2) artifact/update integrity — see INFRA-009 (no signing, no updater configured, which is also why there is no committed private key, a good posture); and (3) the Tauri capability/permission model — see INFRA-011. This finding documents the N/A mapping and points at where the real risk lives.",
+      "remediation": "No action; informational. Treat the release workflow, code signing, and Tauri capabilities as the security-critical 'infrastructure' for this app and prioritize the related findings accordingly."
+    },
+    {
+      "id": "INFRA-011",
+      "severity": "info",
+      "title": "Tauri capabilities are minimal (no broad shell/fs/http/opener scopes) — good posture, noted",
+      "file": "src-tauri/capabilities/default.json",
+      "line": 6,
+      "snippet": "\"permissions\": [\n    \"core:default\",\n    \"opener:default\",\n    \"dialog:default\",\n    \"notification:default\"\n  ]",
+      "description": "The single capability grants only core:default, opener:default, dialog:default and notification:default to the 'main' window. There are no wildcard scopes, no broad fs/shell/http allowlists, no remote-URL window access, no dangerousRemoteDomainIpcAccess, no withGlobalTauri, and assetProtocol is not enabled — so the desktop analog of 'overly permissive IAM roles' is NOT present. This is a healthy least-privilege baseline and is recorded as a positive/informational finding. Note that the app's actual privileged operations (running git/gh/claude subprocesses) are implemented in Rust #[tauri::command] handlers via proc::, not exposed through a Tauri shell plugin scope — so confirm those command handlers (out of this agent's infra scope) properly validate/escape their arguments, since the capability layer does not constrain them.",
+      "remediation": "No change required. Keep capabilities minimal: review opener:default to ensure only intended open targets are reachable from untrusted content, and continue to avoid enabling shell/fs plugins or dangerousRemoteDomainIpcAccess. Ensure the Rust subprocess command handlers (outside this file) do their own input validation, since capabilities do not gate them."
+    }
+  ]
+}

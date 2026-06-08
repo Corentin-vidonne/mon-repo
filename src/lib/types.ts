@@ -114,6 +114,19 @@ export type CommitDetail = {
   diff: string;
 };
 
+/** A line in a commit's structured diff (for the split picker). */
+export type SplitDiffLine = {
+  /** context | add | del | meta */
+  kind: "context" | "add" | "del" | "meta";
+  /** Line text without the leading +/-/space marker. */
+  text: string;
+  /** Stable id for selectable add/del lines; null for context/meta. */
+  id: number | null;
+};
+export type SplitHunk = { header: string; lines: SplitDiffLine[] };
+/** One file in a commit's diff, with `selectable` false for binary / pure-deletion files. */
+export type SplitDiffFile = { path: string; hunks: SplitHunk[]; selectable: boolean };
+
 export type SubmitStepInfo = {
   branch: string;
   base: string;

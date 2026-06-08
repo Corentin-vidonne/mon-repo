@@ -1,0 +1,147 @@
+{
+  "findings": [
+    {
+      "id": "DEP-001",
+      "package": "lucide-react",
+      "version": "1.17.0",
+      "severity": "info",
+      "cve": "N/A",
+      "description": "TYPOSQUAT CHECK RESULT: NOT a typosquat / NOT suspicious. The audit brief flagged `lucide-react: \"^1.17.0\"` as suspect on the assumption that real versions are only 0.x. This is OUTDATED. Verified against the live npm registry: lucide-react now has 669 published versions and 1.17.0 IS the current `latest` dist-tag. The installed package (node_modules/lucide-react@1.17.0) is the genuine package: author 'Eric Fennis', homepage https://lucide.dev, repository git+https://github.com/lucide-icons/lucide.git (directory packages/lucide-react), license ISC, resolved from https://registry.npmjs.org/lucide-react/-/lucide-react-1.17.0.tgz. The lucide project crossed from 0.x into 1.x in its normal release line. No supply-chain concern. Recorded for completeness because it was explicitly called out for scrutiny.",
+      "fix_version": null,
+      "remediation": "No action required. Version is legitimate and current. If you want reproducibility, the committed package-lock.json already pins it to 1.17.0 with the official registry URL.",
+      "file": "package.json"
+    },
+    {
+      "id": "DEP-002",
+      "package": "@xterm/xterm",
+      "version": "6.0.0",
+      "severity": "info",
+      "cve": "N/A",
+      "description": "SANITY CHECK RESULT: legitimate. `@xterm/xterm: \"^6.0.0\"` was flagged for sanity-check. Verified against the live npm registry: @xterm/xterm has 468 published versions, 6.0.0 IS the current `latest`, maintainer is 'tyriar' (xterm.js lead), repository git+https://github.com/xtermjs/xterm.js.git. Installed and lockfile-pinned to 6.0.0 from the official registry URL. The scoped @xterm/* packages are the modern xterm.js publish channel (replacing the legacy unscoped `xterm`). No supply-chain concern.",
+      "fix_version": null,
+      "remediation": "No action required. Name and version are both genuine.",
+      "file": "package.json"
+    },
+    {
+      "id": "DEP-003",
+      "package": "package-lock.json (npm lockfile)",
+      "version": "lockfileVersion 3",
+      "severity": "info",
+      "cve": "N/A",
+      "description": "BRIEF DISCREPANCY (in the project's favor): the audit brief stated 'there is no package-lock.json committed (versions are floating ^/~ ranges)'. This is NOT the case for the current tree. A committed package-lock.json (149 KB, lockfileVersion 3) IS present at the repo root and pins every dependency to an exact version + resolved registry URL + integrity hash. So npm installs ARE reproducible and supply-chain pinning is in effect. The floating ^/~ ranges in package.json are backed by exact pins in the lockfile. (Cargo.lock is likewise present and was used for exact Rust versions.) No remediation needed; flagged only to correct the brief's premise so the orchestrator does not double-report a 'missing lockfile' finding.",
+      "fix_version": null,
+      "remediation": "No action needed. Keep package-lock.json committed and run `npm ci` (not `npm install`) in CI to enforce the lockfile.",
+      "file": "package-lock.json"
+    },
+    {
+      "id": "DEP-004",
+      "package": "npm audit (frontend)",
+      "version": "274 deps (118 prod / 157 dev / 86 optional)",
+      "severity": "info",
+      "cve": "N/A",
+      "description": "SCANNER RESULT: `npm audit --json` ran successfully against the committed lockfile and reported ZERO vulnerabilities (info 0, low 0, moderate 0, high 0, critical 0; total 0) across all 274 resolved dependencies. No known GHSA/CVE advisories match any installed npm package@version at audit time.",
+      "fix_version": null,
+      "remediation": "No action required. Re-run `npm audit` periodically (and in CI) as advisories are published over time.",
+      "file": "package.json"
+    },
+    {
+      "id": "DEP-005",
+      "package": "dagre",
+      "version": "0.8.5",
+      "severity": "low",
+      "cve": "N/A",
+      "description": "UNMAINTAINED / STALE. dagre@0.8.5 is the latest published version but was last modified 2022-06-14 (~4 years ago, well past the >2-year threshold). The original dagre project is effectively abandoned (the maintainer pointed users to the @dagrejs fork). It is not deprecated and has no known CVE, but it is dead code from a maintenance standpoint and bundles a vendored copy of an old lodash (dagre depends on lodash internally) into the frontend. Used for graph layout of the branch tree. Low risk because it runs purely client-side in the desktop webview on local repo data, but it will not receive fixes.",
+      "fix_version": null,
+      "remediation": "Consider migrating to the maintained fork `@dagrejs/dagre` (drop-in API-compatible) which gets updates and ships a newer lodash. Not urgent; no active vulnerability.",
+      "file": "package.json"
+    },
+    {
+      "id": "DEP-006",
+      "package": "react / react-dom",
+      "version": "19.2.6",
+      "severity": "info",
+      "cve": "N/A",
+      "description": "MINOR STALENESS (not a vulnerability). react and react-dom resolve to 19.2.6; current registry latest is 19.2.7 (a single patch release ahead). No security advisory affects 19.2.6. Noted only so the orchestrator does not mistake it for an issue.",
+      "fix_version": "19.2.7",
+      "remediation": "Optional: `npm update react react-dom` to pick up 19.2.7. No security urgency.",
+      "file": "package.json"
+    },
+    {
+      "id": "DEP-007",
+      "package": "cargo audit (Rust)",
+      "version": "cargo-audit not installed",
+      "severity": "info",
+      "cve": "N/A",
+      "description": "SCANNER STATUS: `cargo audit` could NOT be run because cargo-audit is not installed on this machine (`cargo audit` -> 'no such command: audit'; `cargo-audit` -> command not found; not on PATH). Per the brief, skipped gracefully and instead cross-referenced every notable crate in src-tauri/Cargo.lock against known RUSTSEC advisories by exact version (findings DEP-008..DEP-011). NOTE: this manual pass covers advisories known as of the assistant's knowledge cutoff; it is not a substitute for a live RustSec DB query.",
+      "fix_version": null,
+      "remediation": "Install the scanner and run it for an authoritative result: `cargo install cargo-audit` then `cargo audit --file src-tauri/Cargo.lock`. Ideally add it to CI.",
+      "file": "src-tauri/Cargo.lock"
+    },
+    {
+      "id": "DEP-008",
+      "package": "gtk (and gdk, gdk-sys, gtk-sys, atk, atk-sys, gdk-pixbuf, gdkx11, pango, cairo-rs, gtk3-macros)",
+      "version": "0.18.x",
+      "severity": "low",
+      "cve": "RUSTSEC-2024-0413",
+      "description": "UNMAINTAINED. The gtk3-rs binding crates (gtk/gdk/atk/pango/cairo-rs and friends at the 0.18.x line) are flagged unmaintained by RUSTSEC-2024-0413: the gtk3-rs project has been deprecated/archived by its maintainers in favor of gtk4-rs, so the GTK3 bindings will receive no further fixes. These are pulled in TRANSITIVELY on Linux only, via tauri -> wry -> webkit2gtk -> gtk. Low severity: it is an end-of-maintenance flag, not a memory-safety exploit, and only affects the Linux build of the desktop app. Tauri must move to a webkitgtk/gtk4 stack upstream to clear it; nothing actionable in this app's own code.",
+      "fix_version": null,
+      "remediation": "No direct fix available (no patched 0.18.x). Track the Tauri/wry upstream migration off gtk3-rs. Acceptable to suppress in cargo-audit (e.g. an ignore entry) since it is Linux-only and transitive, while keeping tauri/wry up to date.",
+      "file": "src-tauri/Cargo.lock"
+    },
+    {
+      "id": "DEP-009",
+      "package": "proc-macro-error",
+      "version": "1.0.4",
+      "severity": "low",
+      "cve": "RUSTSEC-2024-0370",
+      "description": "UNMAINTAINED. proc-macro-error 1.0.4 is flagged by RUSTSEC-2024-0370 (maintainer unreachable, no releases since 2022; it also depends on the unmaintained syn 1.x in some trees). Here it is a BUILD-TIME-ONLY, transitive dependency (pulled via gtk3-macros / glib-macros proc-macro crates). It does not ship in the runtime binary. Low risk: compile-time only, no runtime attack surface.",
+      "fix_version": null,
+      "remediation": "No code change needed in this app. The replacement is `proc-macro-error2`; it will drop out once the upstream gtk3-rs/glib macro crates migrate. Safe to ignore in cargo-audit as a build-only transitive dep.",
+      "file": "src-tauri/Cargo.lock"
+    },
+    {
+      "id": "DEP-010",
+      "package": "glib",
+      "version": "0.18.5",
+      "severity": "low",
+      "cve": "RUSTSEC-2024-0429",
+      "description": "SOUNDNESS ADVISORY. glib 0.18.5 falls in the affected range of RUSTSEC-2024-0429 (>=0.15.0, <0.20.0): `glib::VariantStrIter::impl_get` had an unsound iterator implementation that could read out of bounds. Pulled in TRANSITIVELY on Linux via the gtk3 stack (tauri -> wry -> webkit2gtk -> gtk -> glib). Low-to-moderate in theory, but low in practice here: the unsound path requires constructing GVariant string-array iterators, which this app does not do directly, and it is Linux-only. The fix landed in glib 0.20.0, which is gated behind the gtk4-rs migration, so it cannot be bumped independently while on the gtk3 stack.",
+      "fix_version": "0.20.0",
+      "remediation": "Cannot upgrade in isolation (tied to gtk3-rs -> gtk4-rs migration upstream in Tauri/wry). Track the upstream bump to glib >=0.20. Low priority given Linux-only + not exercised by app code.",
+      "file": "src-tauri/Cargo.lock"
+    },
+    {
+      "id": "DEP-011",
+      "package": "ureq",
+      "version": "2.12.1",
+      "severity": "info",
+      "cve": "N/A",
+      "description": "MAINTENANCE NOTE (no CVE). The brief asked to check whether `ureq` v2 is 'older'. ureq 2.12.1 is on the v2 major line; a v3 major exists upstream. However v2.12.x is a RECENT release (2.12 series is 2024+) and the v2 branch still receives maintenance, so ureq is NOT abandoned. No known RUSTSEC advisory affects 2.12.1. In this app ureq is a direct dependency configured with default-features=false (TLS disabled) and is used ONLY to query the local Ollama endpoint (http://localhost) for model detection per Cargo.toml comment and CLAUDE.md, so its network attack surface is localhost-only.",
+      "fix_version": "3.x (optional major upgrade)",
+      "remediation": "No security action required. Optionally plan a future migration to ureq 3.x for longevity, but staying on maintained 2.12.x is fine. Keep default-features=false (no TLS) since it only talks to localhost.",
+      "file": "src-tauri/Cargo.toml"
+    },
+    {
+      "id": "DEP-012",
+      "package": "Rust runtime crates (tauri 2.11.2, wry 0.55.1, tao 0.35.3, tokio 1.52.3, hyper 1.10.1, reqwest 0.13.4, time 0.3.47, chrono 0.4.44, url 2.5.8, idna 1.1.0, smallvec 1.15.1, getrandom 0.2/0.3/0.4, flate2 1.1.9, brotli 8.0.3, tempfile 3.27.0, portable-pty 0.8.1)",
+      "version": "see description",
+      "severity": "info",
+      "cve": "N/A",
+      "description": "CLEAN (no known advisories at these versions). Manually cross-referenced the security-relevant crates in Cargo.lock against RUSTSEC advisories I know of; all are on versions past the affected ranges: tokio 1.52.3 (clear of RUSTSEC-2023-0001 broadcast/named-pipe issues), time 0.3.47 (clear of RUSTSEC-2020-0071), smallvec 1.15.1 (clear of RUSTSEC-2021-0003), chrono 0.4.44 (clear of the old localtime_r soundness issue), url 2.5.8 / idna 1.1.0 (clear of the IDNA punycode RUSTSEC-2024-0421 which hit idna <1.0). tauri 2.11.2 and wry 0.55.1 are recent 2.x releases. portable-pty 0.8.1 has no known advisory. No CVE/RUSTSEC finding for these. Listed as an explicit 'checked and clean' record so the orchestrator knows the core stack was reviewed.",
+      "fix_version": null,
+      "remediation": "No action required. Run `cargo audit` in CI for ongoing authoritative coverage (see DEP-007).",
+      "file": "src-tauri/Cargo.lock"
+    },
+    {
+      "id": "DEP-013",
+      "package": "Distributed-binary license review (npm + Cargo)",
+      "version": "N/A",
+      "severity": "info",
+      "cve": "N/A",
+      "description": "LICENSE CHECK: no GPL/AGPL contamination found in the application's own dependency choices. Direct npm deps are permissive: lucide-react ISC, react/react-dom MIT, @xterm/* MIT, @xyflow/react MIT, dagre MIT, react-markdown MIT, @tauri-apps/* MIT/Apache-2.0. Direct Rust deps (tauri, serde, serde_json, toml, portable-pty, base64, ureq) are MIT/Apache-2.0. CAVEAT to verify if distributing Linux binaries: the transitive GTK3/WebKitGTK stack on Linux (gtk-sys/webkit2gtk-sys -> system libwebkit2gtk) links LGPL/GPL-family system libraries; this is the standard Tauri-on-Linux situation (dynamic linking to LGPL is generally fine, and WebKitGTK itself is LGPL/BSD) and is not introduced by this app's code, but a formal license audit (e.g. `cargo-deny check licenses`) is recommended before shipping Linux packages. No AGPL anywhere.",
+      "fix_version": null,
+      "remediation": "Optional: add `cargo-deny` (license + advisory gate) and an npm license checker to CI. For Linux distribution, confirm WebKitGTK/GTK dynamic-linking obligations are met (they normally are for LGPL via dynamic linking). No copyleft code is statically pulled into the binary by app choices.",
+      "file": "src-tauri/Cargo.lock"
+    }
+  ]
+}

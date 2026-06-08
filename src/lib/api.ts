@@ -11,10 +11,12 @@ import type {
   IssueSummary,
   PrDescription,
   PrDetail,
+  PrFinding,
   PrReview,
   PrSummary,
   RepoGraph,
   RepoView,
+  SplitDiffFile,
   StashEntry,
   SubmitStepInfo,
   UpdateItem,
@@ -79,6 +81,16 @@ export const api = {
     invoke<RepoView>("move_commit", { path, branch, sha, direction }),
   squashCommit: (path: string, branch: string, sha: string) =>
     invoke<RepoView>("squash_commit", { path, branch, sha }),
+  splitDiff: (path: string, sha: string) =>
+    invoke<SplitDiffFile[]>("split_diff", { path, sha }),
+  splitCommit: (
+    path: string,
+    branch: string,
+    sha: string,
+    lines: number[],
+    msg1: string,
+    msg2: string
+  ) => invoke<RepoView>("split_commit", { path, branch, sha, lines, msg1, msg2 }),
   cherryPick: (path: string, sha: string, target: string) =>
     invoke<RepoView>("cherry_pick", { path, sha, target }),
   stackCommits: (path: string, branches?: string[] | null) =>
@@ -93,6 +105,12 @@ export const api = {
     event: "approve" | "request_changes" | "comment",
     body: string
   ) => invoke<PrDetail>("submit_pr_review", { path, number, event, body }),
+  postReviewComments: (
+    path: string,
+    number: number,
+    summary: string,
+    findings: PrFinding[]
+  ) => invoke<string>("post_review_comments", { path, number, summary, findings }),
   prChecks: (path: string, number: number) =>
     invoke<CheckRun[]>("pr_checks", { path, number }),
   reviewPr: (path: string, number: number) =>

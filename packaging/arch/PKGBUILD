@@ -1,0 +1,29 @@
+# Maintainer: Corentin Vidonne <corentin.vidonne@gmail.com>
+#
+# Descripteur de packaging CI pour la release EndeavourOS / Arch Linux.
+#
+# Ce PKGBUILD ne compile PAS depuis les sources : le binaire `gitui`, les icônes et le
+# fichier .desktop sont produits en amont par le workflow `release`
+# (`npx tauri build --no-bundle`) puis déposés à côté de ce fichier ; `makepkg` se contente
+# de les empaqueter dans un .pkg.tar.zst. `pkgver` et `url` sont renseignés par le workflow.
+pkgname=gitui
+pkgver=0.0.0
+pkgrel=1
+pkgdesc="Outil de piles de branches (stacked PRs) — Graphite auto-hébergé, Tauri + React"
+arch=('x86_64')
+url="https://github.com/OWNER/REPO"
+license=('custom')
+depends=('webkit2gtk-4.1' 'gtk3' 'git' 'xdg-utils')
+optdepends=('github-cli: intégration GitHub (push, ouverture/màj des PRs)'
+            'claude-code: aides IA via Claude Code (review, conflits, chat)')
+# Les artefacts sont préconstruits : on court-circuite la compilation / le strip / le debug
+# de makepkg (il ne fait qu'installer les fichiers déjà prêts).
+options=('!strip' '!debug')
+
+package() {
+  install -Dm755 "$startdir/gitui"                "$pkgdir/usr/bin/gitui"
+  install -Dm644 "$startdir/gitui.desktop"        "$pkgdir/usr/share/applications/gitui.desktop"
+  install -Dm644 "$startdir/icons/32x32.png"      "$pkgdir/usr/share/icons/hicolor/32x32/apps/gitui.png"
+  install -Dm644 "$startdir/icons/128x128.png"    "$pkgdir/usr/share/icons/hicolor/128x128/apps/gitui.png"
+  install -Dm644 "$startdir/icons/128x128@2x.png" "$pkgdir/usr/share/icons/hicolor/256x256/apps/gitui.png"
+}

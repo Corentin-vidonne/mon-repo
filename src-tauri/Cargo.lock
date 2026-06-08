@@ -1319,6 +1319,7 @@ dependencies = [
  "tempfile",
  "toml 0.8.2",
  "ureq",
+ "url",
 ]
 
 [[package]]

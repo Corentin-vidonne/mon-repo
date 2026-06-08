@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { X, ExternalLink, CircleDot, CircleCheck } from "lucide-react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { safeOpen } from "../lib/safeOpen";
 import type { IssueDetail } from "../lib/types";
 import { api, errorText } from "../lib/api";
 import { CommentList } from "./CommentList";
@@ -77,7 +77,7 @@ export function IssueDetailPanel({
                 </span>
               ))}
               <button
-                onClick={() => openUrl(issue.url)}
+                onClick={() => safeOpen(issue.url)}
                 className="ml-auto inline-flex items-center gap-1.5 rounded-md border border-neutral-700 px-2.5 py-1 text-xs text-neutral-300 hover:bg-neutral-800"
               >
                 <ExternalLink className="h-3.5 w-3.5" /> Open

@@ -1,0 +1,8 @@
+version: 2
+updates:
+  # Keep the SHA-pinned GitHub Actions in .github/workflows/* current (and re-pin to the
+  # new SHA with an updated tag comment) without tracking mutable tags.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"

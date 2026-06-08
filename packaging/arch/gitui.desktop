@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=gitui
+GenericName=Stacked PRs
+Comment=Outil de piles de branches (stacked PRs)
+Exec=gitui
+Icon=gitui
+Terminal=false
+Categories=Development;RevisionControl;
+StartupWMClass=gitui

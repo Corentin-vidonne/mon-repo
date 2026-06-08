@@ -72,6 +72,9 @@ pub fn set_ai_backend(
 /// Done from Rust (no browser CORS) so detection works in the packaged app too.
 #[tauri::command]
 pub async fn ollama_models(host: String) -> Result<Vec<String>> {
+    // Validate/normalize before any network use: this host becomes a `GET <host>/api/tags`
+    // request, i.e. an SSRF sink. Rejects non-http(s) schemes and link-local/metadata IPs.
+    let base = assist::validate_ollama_host(&host)?;
     tauri::async_runtime::spawn_blocking(move || {
         let mut names: Vec<String> = Vec::new();
 
@@ -90,9 +93,7 @@ pub async fn ollama_models(host: String) -> Result<Vec<String>> {
             }
         }
 
-        // 2) Locally pulled models from the running server.
-        let base = host.trim().trim_end_matches('/');
-        let base = if base.is_empty() { "http://localhost:11434" } else { base };
+        // 2) Locally pulled models from the running (validated) server.
         let url = format!("{base}/api/tags");
         let agent = ureq::AgentBuilder::new()
             .timeout_connect(std::time::Duration::from_secs(2))
@@ -170,6 +171,14 @@ fn clone_repo_blocking(url: &str, dest_parent: &str) -> Result<RepoView> {
     if url.is_empty() {
         return Err(AppError::new("Repository URL is required"));
     }
+    // Reject a URL git would parse as an option (`--upload-pack=<cmd>`, `-c …`) — that is
+    // argument injection / local command execution. The `--` separator below is the second
+    // line of defense.
+    if url.starts_with('-') {
+        return Err(AppError::new(
+            "URL de dépôt invalide (ne peut pas commencer par « - »).",
+        ));
+    }
     let parent = Path::new(dest_parent);
     if !parent.is_dir() {
         return Err(AppError::new("Destination folder does not exist"));
@@ -190,7 +199,16 @@ fn clone_repo_blocking(url: &str, dest_parent: &str) -> Result<RepoView> {
     // prompt for a private repo (the captured subprocess has no interactive stdin).
     let r = proc::run_env(
         "git",
-        ["clone", url, target_str.as_str()],
+        // `-c protocol.ext.allow=never` blocks the `ext::<cmd>` transport (RCE vector); `--`
+        // stops git from treating `url` / `target` as options.
+        [
+            "-c",
+            "protocol.ext.allow=never",
+            "clone",
+            "--",
+            url,
+            target_str.as_str(),
+        ],
         Some(parent),
         &[("GIT_TERMINAL_PROMPT", "0")],
     )?;
@@ -862,6 +880,184 @@ pub fn squash_commit(path: String, branch: String, sha: String) -> Result<RepoVi
     apply_edit(repo, &base, &branch, &todo, None)
 }
 
+/// Generate the diff used to split a commit: `git diff <parent> <sha>`, full and
+/// uncolored, so the structured view shown to the user and the patch applied during the
+/// split come from byte-identical text (hence identical line ids).
+fn commit_split_diff_text(repo: &Path, sha: &str) -> Result<String> {
+    let parent = format!("{sha}^");
+    git::git(repo, &["diff", "--no-color", parent.as_str(), sha])
+}
+
+/// Per-call counter so concurrent splits never collide on the temp patch file
+/// (process-global, like `git::EDIT_SEQ` for rebase todos).
+static SPLIT_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// While paused at an `edit` step, rewrite the target commit as two: soft-undo it, stage
+/// exactly the selected lines (`patch`) for the first commit, then everything else for
+/// the second. `git apply --recount` tolerates the rebuilt hunk headers.
+fn split_paused_commit_lines(repo: &Path, patch: &str, msg1: &str, msg2: &str) -> Result<()> {
+    // Undo the commit but keep all its changes (index reset to the parent, tree intact).
+    git::git(repo, &["reset", "--mixed", "HEAD^"])?;
+
+    // Stage only the selected lines, via a temp patch applied to the index.
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let n = SPLIT_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let pf = dir.join(format!("gitui-split-{pid}-{n}.patch"));
+    std::fs::write(&pf, patch).map_err(|e| AppError::new(format!("write patch: {e}")))?;
+    let pf_arg = pf.to_string_lossy().to_string();
+    let r = proc::run(
+        "git",
+        ["apply", "--cached", "--recount", "--whitespace=nowarn", pf_arg.as_str()],
+        Some(repo),
+    );
+    let _ = std::fs::remove_file(&pf);
+    let r = r.map_err(|e| AppError::new(e.to_string()))?;
+    if !r.success {
+        return Err(AppError::new(format!(
+            "git apply (sélection) a échoué : {}",
+            r.stderr.trim()
+        )));
+    }
+    if !git::has_staged_changes(repo) {
+        return Err(AppError::new("La sélection ne stage aucun changement."));
+    }
+    git::git(repo, &["commit", "-m", msg1])?;
+
+    // Second commit: everything that remains in the working tree.
+    git::git(repo, &["add", "-A"])?;
+    if !git::has_staged_changes(repo) {
+        return Err(AppError::new(
+            "Rien ne reste pour le second commit — laisse au moins une ligne non cochée.",
+        ));
+    }
+    git::git(repo, &["commit", "-m", msg2])?;
+    Ok(())
+}
+
+/// The structured diff of a commit (files → hunks → lines, with stable ids on the add/del
+/// lines of line-splittable files), for the split picker UI.
+#[tauri::command]
+pub fn split_diff(path: String, sha: String) -> Result<Vec<crate::diff::FileDiff>> {
+    let root = git::repo_root(Path::new(&path))?;
+    let repo = Path::new(&root);
+    let text = commit_split_diff_text(repo, &sha)?;
+    Ok(crate::diff::parse(&text))
+}
+
+/// Split one commit into two at the line level. `lines` are the ids (from `split_diff`)
+/// of the changed lines that go into the FIRST (lower) commit with message `msg1`;
+/// everything else — including binary / deleted files, which aren't line-splittable —
+/// goes into a second (upper) commit with message `msg2`. The branch's newer commits and
+/// any descendant branches are replayed onto the new tip.
+#[tauri::command]
+pub fn split_commit(
+    path: String,
+    branch: String,
+    sha: String,
+    lines: Vec<u32>,
+    msg1: String,
+    msg2: String,
+) -> Result<RepoView> {
+    let root = git::repo_root(Path::new(&path))?;
+    let repo = Path::new(&root);
+    if git::rebase_in_progress(repo) {
+        return Err(AppError::new("Finish the in-progress restack first"));
+    }
+    if git::is_dirty(repo) {
+        return Err(AppError::new("Commit or stash your changes before editing commits"));
+    }
+    let base = edit_base(repo, &branch)?;
+    let shas = branch_commit_shas(repo, &base, &branch)?;
+    let full = resolve_on_branch(repo, &shas, &sha)?;
+
+    // Parse the commit's diff (identical text → identical ids as split_diff).
+    let text = commit_split_diff_text(repo, &full)?;
+    let files = crate::diff::parse(&text);
+    if files.iter().any(|f| f.renamed) {
+        return Err(AppError::new(
+            "Ce commit contient un renommage — le découpage par lignes ne le gère pas encore.",
+        ));
+    }
+    let universe = crate::diff::selectable_ids(&files);
+    if universe.is_empty() {
+        return Err(AppError::new(
+            "Aucune ligne découpable dans ce commit (binaire / suppression de fichier).",
+        ));
+    }
+    let selected: std::collections::HashSet<u32> =
+        lines.into_iter().filter(|id| universe.contains(id)).collect();
+    if selected.is_empty() {
+        return Err(AppError::new(
+            "Sélectionne au moins une ligne pour le premier commit.",
+        ));
+    }
+    let msg1 = msg1.trim();
+    let msg2 = msg2.trim();
+    if msg1.is_empty() || msg2.is_empty() {
+        return Err(AppError::new("Les deux messages de commit sont requis"));
+    }
+
+    let patch = crate::diff::build_partial_patch(&files, &selected);
+    if patch.trim().is_empty() {
+        return Err(AppError::new(
+            "La sélection ne produit aucun changement à appliquer.",
+        ));
+    }
+
+    crate::undo::global().push(repo, "split commit");
+
+    // Mark the target `edit` (pauses the rebase on it); everything else is a plain pick.
+    let todo = shas
+        .iter()
+        .map(|s| format!("{} {}", if *s == full { "edit" } else { "pick" }, s))
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    // Start the interactive rebase. An `edit` step makes git STOP on the target commit
+    // and exit 0 (an intentional pause, not an error) — so detect the pause via
+    // `rebase_in_progress`, not the exit code. A non-zero exit that leaves a rebase
+    // running instead means an earlier pick hit a conflict.
+    match git::rebase_edit(repo, &base, &branch, &todo, None)? {
+        false => {
+            let _ = git::rebase_abort(repo);
+            return Err(AppError::new(
+                "Conflit pendant la préparation du découpage — opération annulée.",
+            ));
+        }
+        true => {
+            if !git::rebase_in_progress(repo) {
+                // Ran to completion without stopping — nothing was split.
+                return Err(AppError::new("Le découpage n'a pas pu démarrer."));
+            }
+        }
+    }
+
+    // Do the split at the paused commit; abort the whole rebase on any failure so we
+    // never leave a half-applied state behind.
+    if let Err(e) = split_paused_commit_lines(repo, &patch, msg1, msg2) {
+        let _ = git::rebase_abort(repo);
+        return Err(e);
+    }
+
+    // Replay the branch's remaining (newer) commits onto the two new ones.
+    let cont = git::rebase_continue(repo)?;
+    if !cont.success {
+        if git::rebase_in_progress(repo) {
+            // A later commit conflicts — surface it like any restack conflict.
+            return build_view(repo);
+        }
+        return Err(AppError::new(format!(
+            "git rebase --continue failed: {}",
+            cont.stderr.trim()
+        )));
+    }
+
+    // Restack any child branches onto the rewritten branch tip.
+    stack::run(repo, None)?;
+    build_view(repo)
+}
+
 /// Cherry-pick a commit onto `target`, then return to the original branch. On conflict
 /// the cherry-pick is aborted and the original branch restored (no half-applied state).
 #[tauri::command]
@@ -993,6 +1189,109 @@ pub fn submit_pr_review(
     let repo = Path::new(&root);
     github::pr_review(repo, number, &event, &body)?;
     github::pr_detail(repo, number)
+}
+
+/// Emoji prefix for a finding severity (visual punch in the posted comments).
+fn severity_emoji(sev: &str) -> &'static str {
+    match sev {
+        "critical" => "🔴",
+        "warning" => "🟡",
+        "info" => "🔵",
+        _ => "⚪",
+    }
+}
+
+/// Post the findings of an AI review onto the PR as a single GitHub review (event
+/// `COMMENT` — never auto-approves / requests changes; the human decides). Findings that
+/// pin a file + line become inline comments; the `summary` and any line-less findings go
+/// in the review body. If GitHub rejects the inline positions (a line not in the diff
+/// fails the whole review), we fall back to a summary-only comment that folds the findings
+/// into the body, so nothing is lost. Returns a short French status for the UI toast.
+#[tauri::command]
+pub fn post_review_comments(
+    path: String,
+    number: u64,
+    summary: String,
+    findings: Vec<crate::model::PrFinding>,
+) -> Result<String> {
+    let root = git::repo_root(Path::new(&path))?;
+    let repo = Path::new(&root);
+
+    // Partition findings: those with a file + line can be pinned inline; the rest are
+    // listed in the review body.
+    let mut inline: Vec<github::InlineComment> = Vec::new();
+    let mut leftover: Vec<&crate::model::PrFinding> = Vec::new();
+    for f in &findings {
+        let has_pos = !f.file.trim().is_empty() && f.line.map(|l| l > 0).unwrap_or(false);
+        if has_pos {
+            let title = if f.title.trim().is_empty() { "(sans titre)" } else { f.title.trim() };
+            let body = format!(
+                "{} **{}** — {}\n\n{}",
+                severity_emoji(&f.severity),
+                f.severity,
+                title,
+                f.detail.trim()
+            );
+            inline.push(github::InlineComment {
+                path: f.file.trim().to_string(),
+                line: f.line.unwrap(),
+                body,
+            });
+        } else if !f.title.trim().is_empty() || !f.detail.trim().is_empty() {
+            leftover.push(f);
+        }
+    }
+
+    // Build the review body: the summary, plus any findings that couldn't be pinned.
+    let mut body = String::new();
+    if !summary.trim().is_empty() {
+        body.push_str(summary.trim());
+    }
+    if !leftover.is_empty() {
+        if !body.is_empty() {
+            body.push_str("\n\n");
+        }
+        body.push_str("**Autres remarques :**\n");
+        for f in &leftover {
+            let title = if f.title.trim().is_empty() { f.detail.trim() } else { f.title.trim() };
+            let loc = if f.file.trim().is_empty() {
+                String::new()
+            } else {
+                format!(" (`{}`)", f.file.trim())
+            };
+            body.push_str(&format!("- {} {}{}\n", severity_emoji(&f.severity), title, loc));
+        }
+    }
+    if body.trim().is_empty() {
+        body.push_str("Relecture IA (via gitui).");
+    }
+    let body = format!("{}\n\n— 🤖 Relecture IA via gitui", body.trim());
+
+    // No inline positions at all → just post the summary as a COMMENT review.
+    if inline.is_empty() {
+        github::pr_review(repo, number, "comment", &body)?;
+        return Ok("Aucune ligne à épingler — résumé posté en commentaire.".to_string());
+    }
+
+    let n_inline = inline.len();
+    match github::pr_review_comments(repo, number, &body, &inline) {
+        Ok(()) => Ok(format!(
+            "Review postée : {n_inline} commentaire(s) en ligne + résumé."
+        )),
+        Err(_) => {
+            // GitHub rejected one or more positions; fold the inline findings into the
+            // body and post a plain summary review so the relecture isn't lost.
+            let mut full = body.clone();
+            full.push_str("\n\n**Commentaires (positions non rattachables au diff) :**\n");
+            for c in &inline {
+                full.push_str(&format!("- `{}:{}` — {}\n", c.path, c.line, c.body.replace('\n', " ")));
+            }
+            github::pr_review(repo, number, "comment", &full)?;
+            Ok(format!(
+                "Positions en ligne refusées par GitHub — résumé + {n_inline} remarque(s) postés en commentaire."
+            ))
+        }
+    }
 }
 
 /// The individual CI checks for a PR (name, bucket, link to logs).
@@ -1631,6 +1930,180 @@ mod tests {
         assert!(squash_commit(path, "feat".into(), c1).is_err());
     }
 
+    /// Selectable line ids belonging to `file` in commit `sha`'s diff (test helper).
+    fn split_ids_for(repo: &Path, sha: &str, file: &str) -> Vec<u32> {
+        let text = commit_split_diff_text(repo, sha).unwrap();
+        let mut out = Vec::new();
+        for f in crate::diff::parse(&text) {
+            if f.path == file && f.selectable {
+                for h in &f.hunks {
+                    for l in &h.lines {
+                        if let Some(id) = l.id {
+                            out.push(id);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    #[test]
+    fn split_partitions_by_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        init_repo(repo);
+        let path = repo.to_string_lossy().to_string();
+        create_branch(path.clone(), "feat".to_string(), None).unwrap();
+        // One commit touching two files.
+        write_file(repo, "a.txt", "a\n");
+        write_file(repo, "b.txt", "b\n");
+        git_ok(repo, &["add", "-A"]);
+        git_ok(repo, &["commit", "-m", "both files"]);
+        let sha = nth_sha(repo, "main", "feat", 0);
+
+        // Select every line of a.txt → it lands in commit 1, b.txt in commit 2.
+        let ids = split_ids_for(repo, &sha, "a.txt");
+        assert!(!ids.is_empty());
+        let view =
+            split_commit(path, "feat".into(), sha, ids, "only a".into(), "only b".into()).unwrap();
+        assert!(view.conflict.is_none(), "split should be clean");
+
+        assert_eq!(edit_subjects(repo, "main", "feat"), vec!["only a", "only b"]);
+
+        let c0 = nth_sha(repo, "main", "feat", 0);
+        let f0 = git::git(repo, &["show", "--name-only", "--format=", &c0]).unwrap();
+        assert!(f0.contains("a.txt") && !f0.contains("b.txt"), "c0 = {f0}");
+        let c1 = nth_sha(repo, "main", "feat", 1);
+        let f1 = git::git(repo, &["show", "--name-only", "--format=", &c1]).unwrap();
+        assert!(f1.contains("b.txt") && !f1.contains("a.txt"), "c1 = {f1}");
+    }
+
+    #[test]
+    fn split_by_lines_within_one_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        init_repo(repo);
+        let path = repo.to_string_lossy().to_string();
+        create_branch(path.clone(), "feat".to_string(), None).unwrap();
+        git_ok(repo, &["config", "core.autocrlf", "false"]); // deterministic blob content
+        // A new 4-line file in a single commit.
+        write_file(repo, "g.txt", "g1\ng2\ng3\ng4\n");
+        git_ok(repo, &["add", "-A"]);
+        git_ok(repo, &["commit", "-m", "add g (4 lines)"]);
+        let sha = nth_sha(repo, "main", "feat", 0);
+
+        // ids 0..3 = g1..g4; put g1 and g3 in the first commit.
+        let ids = split_ids_for(repo, &sha, "g.txt");
+        assert_eq!(ids.len(), 4, "four added lines");
+        let first = vec![ids[0], ids[2]];
+
+        let view =
+            split_commit(path, "feat".into(), sha, first, "g1+g3".into(), "g2+g4".into()).unwrap();
+        assert!(view.conflict.is_none(), "line split should be clean");
+        assert_eq!(edit_subjects(repo, "main", "feat"), vec!["g1+g3", "g2+g4"]);
+
+        // Commit 1 created g.txt with ONLY the two selected lines…
+        let c0 = nth_sha(repo, "main", "feat", 0);
+        let v0 = git::git(repo, &["show", &format!("{c0}:g.txt")]).unwrap();
+        assert_eq!(v0, "g1\ng3\n", "first commit holds only the selected lines");
+        // …and the branch tip still has the whole file.
+        let tip = git::git(repo, &["show", "feat:g.txt"]).unwrap();
+        assert_eq!(tip, "g1\ng2\ng3\ng4\n");
+    }
+
+    #[test]
+    fn split_modification_with_context_lines() {
+        // Exercises `git apply --cached` of a rewritten hunk that mixes context, a kept
+        // change, and a deferred change (the realistic line-split case).
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        init_repo(repo);
+        let path = repo.to_string_lossy().to_string();
+        git_ok(repo, &["config", "core.autocrlf", "false"]);
+        write_file(repo, "f.txt", "l1\nl2\nl3\nl4\n");
+        git_ok(repo, &["add", "-A"]);
+        git_ok(repo, &["commit", "-m", "base f"]);
+        create_branch(path.clone(), "feat".to_string(), None).unwrap();
+        // One commit edits two distinct lines (l2 and l4), with context around them.
+        write_file(repo, "f.txt", "l1\nL2\nl3\nL4\n");
+        git_ok(repo, &["add", "-A"]);
+        git_ok(repo, &["commit", "-m", "edit l2 and l4"]);
+        let sha = nth_sha(repo, "main", "feat", 0);
+
+        // Select only the l2→L2 change (its deletion + addition).
+        let parsed = crate::diff::parse(&commit_split_diff_text(repo, &sha).unwrap());
+        let mut sel = Vec::new();
+        for f in &parsed {
+            for h in &f.hunks {
+                for l in &h.lines {
+                    if let Some(id) = l.id {
+                        if l.text == "l2" || l.text == "L2" {
+                            sel.push(id);
+                        }
+                    }
+                }
+            }
+        }
+        assert_eq!(sel.len(), 2, "the l2→L2 change is one deletion + one addition");
+
+        split_commit(path, "feat".into(), sha, sel, "edit l2".into(), "edit l4".into()).unwrap();
+        assert_eq!(edit_subjects(repo, "main", "feat"), vec!["edit l2", "edit l4"]);
+
+        // Commit 1 applied only the l2 edit; l4 is still deferred to commit 2.
+        let c0 = nth_sha(repo, "main", "feat", 0);
+        let v0 = git::git(repo, &["show", &format!("{c0}:f.txt")]).unwrap();
+        assert_eq!(v0, "l1\nL2\nl3\nl4\n");
+        let tip = git::git(repo, &["show", "feat:f.txt"]).unwrap();
+        assert_eq!(tip, "l1\nL2\nl3\nL4\n");
+    }
+
+    #[test]
+    fn split_refuses_empty_and_full_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        init_repo(repo);
+        let path = repo.to_string_lossy().to_string();
+        create_branch(path.clone(), "feat".to_string(), None).unwrap();
+        write_file(repo, "g.txt", "g1\ng2\n");
+        git_ok(repo, &["add", "-A"]);
+        git_ok(repo, &["commit", "-m", "add g"]);
+        let sha = nth_sha(repo, "main", "feat", 0);
+        let ids = split_ids_for(repo, &sha, "g.txt");
+
+        // Nothing selected → first commit would be empty.
+        assert!(split_commit(path.clone(), "feat".into(), sha.clone(), vec![], "m1".into(), "m2".into()).is_err());
+        // Everything selected → second commit would be empty.
+        assert!(split_commit(path.clone(), "feat".into(), sha, ids, "m1".into(), "m2".into()).is_err());
+        // A refused split must not leave a rebase paused.
+        assert!(!git::rebase_in_progress(repo));
+    }
+
+    #[test]
+    fn split_replays_newer_commits() {
+        let dir = tempfile::tempdir().unwrap();
+        let repo = dir.path();
+        init_repo(repo);
+        let path = repo.to_string_lossy().to_string();
+        create_branch(path.clone(), "feat".to_string(), None).unwrap();
+        // c1 touches a.txt + b.txt; c2 (newer) touches c.txt.
+        write_file(repo, "a.txt", "a\n");
+        write_file(repo, "b.txt", "b\n");
+        git_ok(repo, &["add", "-A"]);
+        git_ok(repo, &["commit", "-m", "c1 both"]);
+        commit_file(repo, "c.txt", "c\n", "c2");
+        let c1 = nth_sha(repo, "main", "feat", 0);
+
+        let ids = split_ids_for(repo, &c1, "a.txt");
+        split_commit(path, "feat".into(), c1, ids, "a only".into(), "b only".into()).unwrap();
+
+        // The split happens in place; the newer commit is replayed on top.
+        assert_eq!(
+            edit_subjects(repo, "main", "feat"),
+            vec!["a only", "b only", "c2"]
+        );
+    }
+
     #[test]
     fn editing_a_parent_restacks_its_child() {
         let dir = tempfile::tempdir().unwrap();
@@ -1732,6 +2205,38 @@ mod tests {
             eprintln!("[{}] {}:{:?} — {}", f.severity, f.file, f.line, f.title);
         }
         assert!(!review.summary.is_empty(), "expected a non-empty summary");
+    }
+
+    // End-to-end: posts a hand-crafted AI review onto the local sandbox PR #3 via the
+    // real `gh api .../reviews` contract (no claude call). utils.js:4 is in the diff, so
+    // the inline comment should attach; the line-less finding lands in the body.
+    // Run explicitly: cargo test --lib e2e_post_review_comments_sandbox -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn e2e_post_review_comments_sandbox() {
+        use crate::model::PrFinding;
+        let path = r"C:\Users\coren\Documents\projet\gitui-sandbox".to_string();
+        let findings = vec![
+            PrFinding {
+                file: "utils.js".into(),
+                line: Some(4),
+                severity: "critical".into(),
+                title: "Off-by-one dans la boucle".into(),
+                detail: "`i <= nums.length` lit un index hors borne — utilise `<`.".into(),
+            },
+            PrFinding {
+                file: String::new(),
+                line: None,
+                severity: "info".into(),
+                title: "Aucun test pour average()".into(),
+                detail: "Ajouter un test unitaire couvrant la liste vide.".into(),
+            },
+        ];
+        let status =
+            post_review_comments(path, 3, "Relecture de test (gitui e2e).".into(), findings)
+                .expect("post_review_comments");
+        eprintln!("status: {status}");
+        assert!(!status.is_empty());
     }
 
     // End-to-end: real claude resolving a real conflict, then applying it.

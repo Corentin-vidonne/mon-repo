@@ -1,4 +1,4 @@
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { safeOpen } from "../lib/safeOpen";
 import type { PrInfo } from "../lib/types";
 
 const STATE_STYLES: Record<string, string> = {
@@ -28,7 +28,7 @@ export function PrBadge({ pr }: { pr: PrInfo }) {
   const rev = reviewMark(pr.reviewDecision);
   return (
     <button
-      onClick={() => openUrl(pr.url)}
+      onClick={() => safeOpen(pr.url)}
       title={`${pr.state}${pr.reviewDecision ? " · " + pr.reviewDecision : ""}${
         pr.checks ? " · CI " + pr.checks : ""
       } — open on GitHub`}

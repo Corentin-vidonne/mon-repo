@@ -229,6 +229,63 @@ pub fn pr_review(repo: &Path, number: u64, event: &str, body: &str) -> Result<()
     Ok(())
 }
 
+/// One inline review comment: a `path`, a `line` in the file's new version, and a body.
+pub struct InlineComment {
+    pub path: String,
+    pub line: u32,
+    pub body: String,
+}
+
+/// Post a single PR review (event = `COMMENT`): `body` is the overall summary and each
+/// [`InlineComment`] is pinned to a line of the diff. Uses `gh api .../reviews` with the
+/// JSON body fed through a temp file (`--input`), since the nested `comments` array can't
+/// be expressed with `gh`'s `-f` flags; `{owner}`/`{repo}` are resolved by gh from the
+/// repo's remote. NOTE: GitHub rejects the WHOLE review if any comment's line isn't part
+/// of the diff, so callers should fall back to a summary-only review on `Err`.
+pub fn pr_review_comments(
+    repo: &Path,
+    number: u64,
+    body: &str,
+    comments: &[InlineComment],
+) -> Result<()> {
+    let payload = serde_json::json!({
+        "event": "COMMENT",
+        "body": body,
+        "comments": comments
+            .iter()
+            .map(|c| serde_json::json!({
+                "path": c.path,
+                "line": c.line,
+                "side": "RIGHT",
+                "body": c.body,
+            }))
+            .collect::<Vec<_>>(),
+    });
+    let text = serde_json::to_string(&payload).map_err(|e| AppError::new(e.to_string()))?;
+
+    let dir = std::env::temp_dir();
+    let pid = std::process::id();
+    let file = dir.join(format!("gitui-review-{pid}-{number}.json"));
+    std::fs::write(&file, &text)
+        .map_err(|e| AppError::new(format!("write review body: {e}")))?;
+    let file_arg = file.to_string_lossy().to_string();
+    let endpoint = format!("repos/{{owner}}/{{repo}}/pulls/{number}/reviews");
+    let r = proc::run(
+        "gh",
+        ["api", endpoint.as_str(), "--method", "POST", "--input", file_arg.as_str()],
+        Some(repo),
+    );
+    let _ = std::fs::remove_file(&file);
+    let r = r.map_err(|e| AppError::new(e.to_string()))?;
+    if !r.success {
+        return Err(AppError::new(format!(
+            "gh api reviews failed: {}",
+            r.stderr.trim()
+        )));
+    }
+    Ok(())
+}
+
 /// The individual CI checks for a PR (`gh pr checks`). gh exits non-zero when checks
 /// fail or are pending, but still prints the JSON — so we parse stdout regardless.
 pub fn pr_checks(repo: &Path, number: u64) -> Result<Vec<CheckRun>> {

@@ -1,0 +1,420 @@
+{
+  "$schema": "https://json.schemastore.org/sarif-2.1.0.json",
+  "version": "2.1.0",
+  "runs": [
+    {
+      "tool": {
+        "driver": {
+          "name": "gitui-security-audit",
+          "fullName": "gitui Multi-Agent Security Audit (SECU.md orchestrator)",
+          "version": "1.0.0",
+          "informationUri": "https://github.com/Corentin-vidonne/gitui",
+          "organization": "gitui",
+          "rules": [
+            {
+              "id": "gitui/csp-disabled",
+              "name": "ContentSecurityPolicyDisabled",
+              "shortDescription": { "text": "Tauri Content-Security-Policy is null" },
+              "fullDescription": { "text": "app.security.csp is null, so the webview enforces no CSP. Any DOM XSS can reach every #[tauri::command] via invoke (IPC->RCE). The frontend renders untrusted git/PR/commit/AI content. Currently latent (Markdown is escaped) but the highest-leverage hardening fix." },
+              "helpUri": "https://v2.tauri.app/security/csp/",
+              "defaultConfiguration": { "level": "error" },
+              "properties": { "security-severity": "7.4", "tags": ["security", "tauri", "csp", "external/cwe/cwe-1021", "external/cwe/cwe-693"], "sourceFindings": ["DAST-001", "INFRA-001", "SAST-006"], "priority": "P0" }
+            },
+            {
+              "id": "gitui/ollama-host-unvalidated",
+              "name": "OllamaHostUnvalidatedSSRFExfil",
+              "shortDescription": { "text": "Unvalidated Ollama host: SSRF + plaintext data exfiltration" },
+              "fullDescription": { "text": "A frontend-supplied host is used unvalidated as a ureq GET target (TLS disabled) and injected verbatim as ANTHROPIC_BASE_URL for every claude spawn, exposing internal services (SSRF) and exfiltrating repo diffs/source over cleartext HTTP." },
+              "helpUri": "https://owasp.org/www-community/attacks/Server_Side_Request_Forgery",
+              "defaultConfiguration": { "level": "error" },
+              "properties": { "security-severity": "7.1", "tags": ["security", "ssrf", "exfiltration", "external/cwe/cwe-918", "external/cwe/cwe-200"], "sourceFindings": ["DAST-004", "SAST-001", "SAST-002"], "priority": "P0" }
+            },
+            {
+              "id": "gitui/compound-approval-overreach",
+              "name": "CompoundCommandApprovalOverreach",
+              "shortDescription": { "text": "LLM compound-command approval whitelists every sub-command session-wide" },
+              "fullDescription": { "text": "toolPatterns() splits a denied command on && || ; | and emits one Bash(prefix:*) pattern per sub-command; approve() persists all of them for the whole session. Approving 'gh pr merge && rm -rf ~' silently whitelists rm. Coarse prefixes also permit dangerous flags (git push --force)." },
+              "helpUri": "https://owasp.org/www-community/Improper_Authorization",
+              "defaultConfiguration": { "level": "error" },
+              "properties": { "security-severity": "7.3", "tags": ["security", "authorization", "llm", "external/cwe/cwe-285", "external/cwe/cwe-78"], "sourceFindings": ["DAST-002"], "priority": "P0" }
+            },
+            {
+              "id": "gitui/unpinned-tauri-action",
+              "name": "UnpinnedReleaseAction",
+              "shortDescription": { "text": "tauri-action pinned to mutable @v0 tag (builds shipped installers)" },
+              "fullDescription": { "text": "The action that builds/bundles/uploads the distributed installers with contents:write GITHUB_TOKEN is referenced by the mutable @v0 tag. A retagged/compromised release can inject code into the binaries end users install." },
+              "helpUri": "https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#using-third-party-actions",
+              "defaultConfiguration": { "level": "error" },
+              "properties": { "security-severity": "8.1", "tags": ["security", "supply-chain", "ci", "external/cwe/cwe-1357", "external/cwe/cwe-829"], "sourceFindings": ["INFRA-006"], "priority": "P0" }
+            },
+            {
+              "id": "gitui/readonly-tools-not-readonly",
+              "name": "ReadonlyToolsNotReadonly",
+              "shortDescription": { "text": "Pre-approved 'read-only' git tools can execute code / write files" },
+              "fullDescription": { "text": "READONLY_TOOLS pre-approves git show/log/diff with :* wildcards. Against a malicious clone these can run external programs (-c core.pager=, --ext-diff, GIT_EXTERNAL_DIFF) or write files (--output=), defeating the read-only guarantee with no approval prompt." },
+              "helpUri": "https://git-scm.com/docs/git-config",
+              "defaultConfiguration": { "level": "warning" },
+              "properties": { "security-severity": "6.8", "tags": ["security", "llm", "allowlist", "external/cwe/cwe-78"], "sourceFindings": ["DAST-005"], "priority": "P1" }
+            },
+            {
+              "id": "gitui/git-argument-injection",
+              "name": "GitArgumentInjection",
+              "shortDescription": { "text": "User-controlled URLs/refs passed to git without -- end-of-options guard" },
+              "fullDescription": { "text": "clone_repo, cherry_pick, checkout and ref-taking commands forward frontend strings as positional git args with no -- separator and no leading-dash rejection, enabling argument injection (e.g. git clone --upload-pack=, ext:: transport). Argv-based (no shell) and partly mitigated by git's protocol allowlist." },
+              "helpUri": "https://git-scm.com/docs/git-clone",
+              "defaultConfiguration": { "level": "warning" },
+              "properties": { "security-severity": "5.9", "tags": ["security", "argument-injection", "external/cwe/cwe-88"], "sourceFindings": ["SAST-004", "SAST-005", "DAST-007"], "priority": "P1" }
+            },
+            {
+              "id": "gitui/unscoped-opener",
+              "name": "UnscopedOpenerUntrustedUrl",
+              "shortDescription": { "text": "Untrusted URLs opened via unscoped opener without scheme validation" },
+              "fullDescription": { "text": "The opener:default capability includes unscoped allow-open-url, and PrPage opens the attacker-influenceable CI-check link (from gh pr checks) with no scheme check, allowing one-click launch of file:// or custom-scheme URLs." },
+              "helpUri": "https://v2.tauri.app/plugin/opener/",
+              "defaultConfiguration": { "level": "warning" },
+              "properties": { "security-severity": "5.4", "tags": ["security", "tauri", "capability", "external/cwe/cwe-601", "external/cwe/cwe-939"], "sourceFindings": ["DAST-006", "SAST-003"], "priority": "P1" }
+            },
+            {
+              "id": "gitui/dangerous-ipc-surface",
+              "name": "DangerousIpcSurfaceUngated",
+              "shortDescription": { "text": "Dangerous IPC commands run subprocesses / write files with no caller-trust boundary" },
+              "fullDescription": { "text": "Every #[tauri::command] is callable by any webview script; combined with the null CSP, injected JS can invoke open_in_vscode (cmd /c code), clone_repo, create_markdown, term/chat spawns, and history-rewriting/force-push commands. open_in_vscode shells through cmd; destructive primitives lack a native confirmation." },
+              "helpUri": "https://v2.tauri.app/security/",
+              "defaultConfiguration": { "level": "warning" },
+              "properties": { "security-severity": "5.5", "tags": ["security", "tauri", "ipc", "external/cwe/cwe-749"], "sourceFindings": ["DAST-003"], "priority": "P1" }
+            },
+            {
+              "id": "gitui/unsigned-artifacts",
+              "name": "UnsignedDistributedArtifacts",
+              "shortDescription": { "text": "Release installers are unsigned (no code signing / updater key)" },
+              "fullDescription": { "text": "bundle.targets is 'all' with no macOS/Windows signing identity and no updater pubkey; CI passes no signing secrets. Users and any future updater cannot cryptographically verify the installers, compounding the unpinned-pipeline supply-chain risk." },
+              "helpUri": "https://v2.tauri.app/distribute/sign/",
+              "defaultConfiguration": { "level": "warning" },
+              "properties": { "security-severity": "5.9", "tags": ["security", "supply-chain", "code-signing", "external/cwe/cwe-347"], "sourceFindings": ["INFRA-009"], "priority": "P1" }
+            },
+            {
+              "id": "gitui/unpinned-actions",
+              "name": "UnpinnedGitHubActions",
+              "shortDescription": { "text": "GitHub Actions pinned to mutable tags/branches instead of SHAs" },
+              "fullDescription": { "text": "actions/checkout@v4, actions/setup-node@v4, dtolnay/rust-toolchain@stable (a moving branch) and swatinem/rust-cache@v2 all run in the privileged release job. Retagged/compromised releases execute arbitrary code with contents:write + GITHUB_TOKEN. The cache action can also poison restored build caches." },
+              "helpUri": "https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#using-third-party-actions",
+              "defaultConfiguration": { "level": "warning" },
+              "properties": { "security-severity": "6.5", "tags": ["security", "supply-chain", "ci", "external/cwe/cwe-1357"], "sourceFindings": ["INFRA-002", "INFRA-003", "INFRA-004", "INFRA-005"], "priority": "P1" }
+            },
+            {
+              "id": "gitui/git-terminal-prompt",
+              "name": "GitTerminalPromptNotDisabled",
+              "shortDescription": { "text": "GIT_TERMINAL_PROMPT/transport hardening not set on most git calls" },
+              "fullDescription": { "text": "Only clone_repo sets GIT_TERMINAL_PROMPT=0. Other network-touching git ops can hang on a credential prompt or interact with unexpected transports against a crafted remote. Set it (and credential/transport guards) in the central proc::run/git() wrapper." },
+              "helpUri": "https://git-scm.com/docs/git",
+              "defaultConfiguration": { "level": "note" },
+              "properties": { "security-severity": "3.7", "tags": ["security", "hardening"], "sourceFindings": ["DAST-009"], "priority": "P2" }
+            },
+            {
+              "id": "gitui/git-editor-shell-string",
+              "name": "GitEditorShellStringInterpolation",
+              "shortDescription": { "text": "GIT_EDITOR/GIT_SEQUENCE_EDITOR built as unescaped shell strings" },
+              "fullDescription": { "text": "rebase_edit sets GIT_SEQUENCE_EDITOR/GIT_EDITOR to a `cp '<temp>'` shell string; single quotes in the path are not escaped. The path is app-controlled (temp_dir + fixed name), so it is fragility/defense-in-depth, not a live injection." },
+              "helpUri": "https://git-scm.com/docs/git-rebase",
+              "defaultConfiguration": { "level": "note" },
+              "properties": { "security-severity": "3.3", "tags": ["security", "hardening", "external/cwe/cwe-78"], "sourceFindings": ["SAST-007"], "priority": "P2" }
+            },
+            {
+              "id": "gitui/no-rate-limiting",
+              "name": "NoRateLimitDestructiveOps",
+              "shortDescription": { "text": "No server-side rate-limiting/provenance on destructive ops" },
+              "fullDescription": { "text": "The process-global AI config has no provenance check, and nothing throttles destructive/expensive commands (submit loop, clone, PTY spawns). Only reachable after an XSS that already yields RCE-equivalent control, so marginal; add coalescing + native confirmation for bulk actions." },
+              "helpUri": "https://owasp.org/www-community/attacks/",
+              "defaultConfiguration": { "level": "note" },
+              "properties": { "security-severity": "3.5", "tags": ["security", "hardening", "external/cwe/cwe-770"], "sourceFindings": ["DAST-008"], "priority": "P2" }
+            },
+            {
+              "id": "gitui/ci-job-write-scope",
+              "name": "CiJobWideWriteScope",
+              "shortDescription": { "text": "contents: write granted job-wide across all matrix legs" },
+              "fullDescription": { "text": "The build job grants contents:write to every matrix runner and step. Add a top-level permissions: contents: read default and keep write only on the release-upload step/job." },
+              "helpUri": "https://docs.github.com/en/actions/using-jobs/assigning-permissions-to-jobs",
+              "defaultConfiguration": { "level": "note" },
+              "properties": { "security-severity": "3.5", "tags": ["security", "ci", "least-privilege"], "sourceFindings": ["INFRA-007"], "priority": "P2" }
+            },
+            {
+              "id": "gitui/ci-tagname-untrusted",
+              "name": "CiTagNameUntrusted",
+              "shortDescription": { "text": "Release tagName from github.ref_name (typed input, low risk)" },
+              "fullDescription": { "text": "tagName is github.ref_name, attacker-influenceable by anyone who can push tags, but used as a typed action input (not in a run: shell), so no injection. Optionally guard with a strict semver pattern." },
+              "helpUri": "https://docs.github.com/en/actions/security-guides/security-hardening-for-github-actions#understanding-the-risk-of-script-injections",
+              "defaultConfiguration": { "level": "note" },
+              "properties": { "security-severity": "2.5", "tags": ["security", "ci"], "sourceFindings": ["INFRA-008"], "priority": "P2" }
+            },
+            {
+              "id": "gitui/toctou-destructive-git",
+              "name": "ToctouDestructiveGit",
+              "shortDescription": { "text": "TOCTOU between is_dirty()/rebase checks and destructive git ops" },
+              "fullDescription": { "text": "Handlers guard reset --hard / branch -f with a prior is_dirty/rebase check; the tree could change in between (PTY/concurrent IPC). Low practical risk for a single-user desktop app; serialize repo-mutating commands behind a per-repo mutex if hardening." },
+              "helpUri": "https://cwe.mitre.org/data/definitions/367.html",
+              "defaultConfiguration": { "level": "note" },
+              "properties": { "security-severity": "2.5", "tags": ["security", "concurrency", "external/cwe/cwe-367"], "sourceFindings": ["SAST-008"], "priority": "P2" }
+            },
+            {
+              "id": "gitui/dep-dagre-unmaintained",
+              "name": "DependencyDagreUnmaintained",
+              "shortDescription": { "text": "dagre@0.8.5 unmaintained (last release 2022)" },
+              "fullDescription": { "text": "dagre is effectively abandoned (maintainer points to @dagrejs/dagre). No CVE; client-side only. Consider migrating to the maintained fork." },
+              "helpUri": "https://github.com/dagrejs/dagre",
+              "defaultConfiguration": { "level": "note" },
+              "properties": { "security-severity": "2.0", "tags": ["dependencies", "unmaintained"], "sourceFindings": ["DEP-005"], "priority": "P2" }
+            },
+            {
+              "id": "gitui/dep-gtk3-unmaintained",
+              "name": "DependencyGtk3Unmaintained",
+              "shortDescription": { "text": "gtk3-rs binding stack unmaintained (RUSTSEC-2024-0413)" },
+              "fullDescription": { "text": "gtk/gdk/atk/pango/cairo-rs (0.18.x) are deprecated in favor of gtk4-rs. Transitive, Linux-only (tauri->wry->webkit2gtk->gtk). End-of-maintenance flag, not a memory-safety exploit; gated behind upstream gtk4 migration." },
+              "helpUri": "https://rustsec.org/advisories/RUSTSEC-2024-0413.html",
+              "defaultConfiguration": { "level": "note" },
+              "properties": { "security-severity": "2.5", "tags": ["dependencies", "unmaintained", "rustsec", "linux-only"], "sourceFindings": ["DEP-008"], "priority": "P2" }
+            },
+            {
+              "id": "gitui/dep-proc-macro-error-unmaintained",
+              "name": "DependencyProcMacroErrorUnmaintained",
+              "shortDescription": { "text": "proc-macro-error@1.0.4 unmaintained (RUSTSEC-2024-0370)" },
+              "fullDescription": { "text": "Build-time-only transitive dependency (via gtk3/glib macros), not in the shipped binary. Replacement is proc-macro-error2; drops out with the upstream migration." },
+              "helpUri": "https://rustsec.org/advisories/RUSTSEC-2024-0370.html",
+              "defaultConfiguration": { "level": "note" },
+              "properties": { "security-severity": "2.0", "tags": ["dependencies", "unmaintained", "rustsec", "build-only"], "sourceFindings": ["DEP-009"], "priority": "P2" }
+            },
+            {
+              "id": "gitui/dep-glib-soundness",
+              "name": "DependencyGlibSoundness",
+              "shortDescription": { "text": "glib@0.18.5 soundness advisory (RUSTSEC-2024-0429)" },
+              "fullDescription": { "text": "VariantStrIter::impl_get out-of-bounds read in glib >=0.15,<0.20. Transitive, Linux-only, not exercised by app code. Fix is glib >=0.20, gated behind the gtk4-rs migration." },
+              "helpUri": "https://rustsec.org/advisories/RUSTSEC-2024-0429.html",
+              "defaultConfiguration": { "level": "note" },
+              "properties": { "security-severity": "3.5", "tags": ["dependencies", "soundness", "rustsec", "linux-only"], "sourceFindings": ["DEP-010"], "priority": "P2" }
+            },
+            {
+              "id": "gitui/cargo-audit-not-run",
+              "name": "CargoAuditNotRun",
+              "shortDescription": { "text": "cargo-audit not installed; Rust pass was a manual RUSTSEC cross-reference" },
+              "fullDescription": { "text": "cargo audit could not run (cargo-audit not installed). Rust dependency findings are a manual cross-reference against Cargo.lock at the knowledge cutoff, not a live DB query. Install cargo-audit and add it to CI." },
+              "helpUri": "https://github.com/rustsec/rustsec/tree/main/cargo-audit",
+              "defaultConfiguration": { "level": "note" },
+              "properties": { "security-severity": "0.0", "tags": ["coverage", "tooling"], "sourceFindings": ["DEP-007"], "priority": "P2" }
+            },
+            {
+              "id": "gitui/markdown-rendering-safe",
+              "name": "MarkdownRenderingSafeWatchItem",
+              "shortDescription": { "text": "Markdown rendering is currently safe (react-markdown v10, no rehype-raw) — keep it" },
+              "fullDescription": { "text": "Positive/watch finding. The Markdown sinks use react-markdown v10 with no rehype-raw and no dangerouslySetInnerHTML, so untrusted HTML is escaped. This is why the null CSP has not produced repo->RCE. Enforce 'no rehype-raw/no dangerouslySetInnerHTML' as an invariant." },
+              "helpUri": "https://github.com/remarkjs/react-markdown#security",
+              "defaultConfiguration": { "level": "note" },
+              "properties": { "security-severity": "0.0", "tags": ["positive", "watch-item", "xss"], "sourceFindings": ["DAST-010"], "priority": "P2" }
+            },
+            {
+              "id": "gitui/capabilities-minimal",
+              "name": "CapabilitiesMinimalPositive",
+              "shortDescription": { "text": "Tauri capabilities are minimal (least-privilege) — positive" },
+              "fullDescription": { "text": "Positive finding. Only core/opener/dialog/notification defaults are granted; no wildcard scopes, no broad shell/fs/http, no dangerousRemoteDomainIpcAccess, no withGlobalTauri. (See gitui/unscoped-opener for the one opener caveat.)" },
+              "helpUri": "https://v2.tauri.app/security/capabilities/",
+              "defaultConfiguration": { "level": "note" },
+              "properties": { "security-severity": "0.0", "tags": ["positive", "tauri", "least-privilege"], "sourceFindings": ["INFRA-011"], "priority": "P2" }
+            },
+            {
+              "id": "gitui/no-real-secrets",
+              "name": "NoRealSecretsCommitted",
+              "shortDescription": { "text": "No real secrets committed (only safe placeholders/managed tokens) — positive" },
+              "fullDescription": { "text": "Positive finding. ANTHROPIC_AUTH_TOKEN='ollama' is Ollama's required-but-ignored placeholder; ${{ secrets.GITHUB_TOKEN }} is the standard managed CI token. No .env, no private keys, no updater signing key in the tree." },
+              "helpUri": "https://docs.github.com/en/actions/security-guides/encrypted-secrets",
+              "defaultConfiguration": { "level": "note" },
+              "properties": { "security-severity": "0.0", "tags": ["positive", "secrets"], "sourceFindings": ["SEC-001", "SEC-002"], "priority": "P2" }
+            }
+          ]
+        }
+      },
+      "results": [
+        {
+          "ruleId": "gitui/csp-disabled",
+          "level": "error",
+          "message": { "text": "Tauri webview ships with no Content-Security-Policy (csp: null). Any DOM XSS becomes full IPC/RCE. Set a strict CSP. [P0; sources: DAST-001, INFRA-001, SAST-006]" },
+          "locations": [ { "physicalLocation": { "artifactLocation": { "uri": "src-tauri/tauri.conf.json" }, "region": { "startLine": 23, "snippet": { "text": "\"security\": { \"csp\": null }" } } } } ],
+          "properties": { "cvss": "7.4", "priority": "P0" }
+        },
+        {
+          "ruleId": "gitui/ollama-host-unvalidated",
+          "level": "error",
+          "message": { "text": "Frontend-supplied Ollama host is used unvalidated as a ureq GET target (TLS off) and as ANTHROPIC_BASE_URL for every claude spawn — SSRF + plaintext exfiltration of repo source. Validate to loopback-only by default. [P0; sources: DAST-004, SAST-001, SAST-002]" },
+          "locations": [
+            { "physicalLocation": { "artifactLocation": { "uri": "src-tauri/src/assist/mod.rs" }, "region": { "startLine": 130, "endLine": 138, "snippet": { "text": "AiBackend::Ollama => { ... (\"ANTHROPIC_BASE_URL\", host), ... }" } } } },
+            { "physicalLocation": { "artifactLocation": { "uri": "src-tauri/src/commands.rs" }, "region": { "startLine": 96, "snippet": { "text": "let url = format!(\"{base}/api/tags\"); agent.get(&url).call()" } } } }
+          ],
+          "properties": { "cvss": "7.1", "priority": "P0" }
+        },
+        {
+          "ruleId": "gitui/compound-approval-overreach",
+          "level": "error",
+          "message": { "text": "toolPatterns() emits one Bash(prefix:*) per sub-command and approve() persists all of them session-wide; 'gh pr merge 7 --squash && rm -rf ~' silently whitelists Bash(rm:*). Require per-sub-command approval and single-turn scope. [P0; source: DAST-002]" },
+          "locations": [ { "physicalLocation": { "artifactLocation": { "uri": "src/components/ChatDock.tsx" }, "region": { "startLine": 65, "endLine": 85, "snippet": { "text": "for (const part of cmd.split(/&&|\\|\\||;|\\|/)) { ... pats.add(`Bash(${prefix.join(\" \")}:*)`) }" } } } } ],
+          "properties": { "cvss": "7.3", "priority": "P0" }
+        },
+        {
+          "ruleId": "gitui/unpinned-tauri-action",
+          "level": "error",
+          "message": { "text": "tauri-apps/tauri-action@v0 (mutable tag) builds/bundles/uploads the distributed installers with contents:write GITHUB_TOKEN. Pin to a full commit SHA + add Dependabot. [P0; source: INFRA-006]" },
+          "locations": [ { "physicalLocation": { "artifactLocation": { "uri": ".github/workflows/release.yml" }, "region": { "startLine": 69, "snippet": { "text": "uses: tauri-apps/tauri-action@v0" } } } } ],
+          "properties": { "cvss": "8.1", "priority": "P0" }
+        },
+        {
+          "ruleId": "gitui/readonly-tools-not-readonly",
+          "level": "warning",
+          "message": { "text": "READONLY_TOOLS pre-approves git show/log/diff with :* wildcards; against a malicious clone these can execute external programs (-c core.pager=, --ext-diff) or write files (--output=) with no prompt. Strip dangerous options / pin a safe git env. [P1; source: DAST-005]" },
+          "locations": [ { "physicalLocation": { "artifactLocation": { "uri": "src-tauri/src/assist/mod.rs" }, "region": { "startLine": 484, "snippet": { "text": "const READONLY_TOOLS: [...] = [\"Bash(git show:*)\",\"Bash(git log:*)\",\"Bash(git diff:*)\", ...]" } } } } ],
+          "properties": { "cvss": "6.8", "priority": "P1" }
+        },
+        {
+          "ruleId": "gitui/git-argument-injection",
+          "level": "warning",
+          "message": { "text": "User-controlled URLs/refs passed to git as positional args without a -- separator or leading-dash rejection (clone, cherry-pick, checkout, show). Add --, reject leading '-', and validate via rev-parse --verify. [P1; sources: SAST-004, SAST-005, DAST-007]" },
+          "locations": [
+            { "physicalLocation": { "artifactLocation": { "uri": "src-tauri/src/commands.rs" }, "region": { "startLine": 193, "snippet": { "text": "proc::run_env(\"git\", [\"clone\", url, target_str.as_str()], ...)" } } } },
+            { "physicalLocation": { "artifactLocation": { "uri": "src-tauri/src/commands.rs" }, "region": { "startLine": 1046, "snippet": { "text": "git::git(repo, &[\"cherry-pick\", &sha])" } } } },
+            { "physicalLocation": { "artifactLocation": { "uri": "src-tauri/src/git/mod.rs" }, "region": { "startLine": 173, "snippet": { "text": "git(repo, &[\"checkout\", \"-b\", name, start])" } } } }
+          ],
+          "properties": { "cvss": "5.9", "priority": "P1" }
+        },
+        {
+          "ruleId": "gitui/unscoped-opener",
+          "level": "warning",
+          "message": { "text": "opener:default includes unscoped allow-open-url, and PrPage opens the attacker-influenceable CI-check link (gh pr checks) with no scheme check — one-click file:///custom-scheme launch. Add safeOpen() and scope the capability to https. [P1; sources: DAST-006, SAST-003]" },
+          "locations": [
+            { "physicalLocation": { "artifactLocation": { "uri": "src/components/PrPage.tsx" }, "region": { "startLine": 489, "snippet": { "text": "onClick={() => openUrl(c.link)}" } } } },
+            { "physicalLocation": { "artifactLocation": { "uri": "src-tauri/capabilities/default.json" }, "region": { "startLine": 6, "snippet": { "text": "\"permissions\": [ \"core:default\", \"opener:default\", ... ]" } } } }
+          ],
+          "properties": { "cvss": "5.4", "priority": "P1" }
+        },
+        {
+          "ruleId": "gitui/dangerous-ipc-surface",
+          "level": "warning",
+          "message": { "text": "All #[tauri::command]s are callable by any webview script; combined with null CSP, injected JS can run open_in_vscode (cmd /c code), clone_repo, create_markdown, term/chat spawns, and history-rewrite/force-push. Spawn 'code' directly; gate destructive primitives behind a native dialog. [P1; source: DAST-003]" },
+          "locations": [ { "physicalLocation": { "artifactLocation": { "uri": "src-tauri/src/lib.rs" }, "region": { "startLine": 30, "snippet": { "text": "invoke_handler(tauri::generate_handler![ ... ])" } } } } ],
+          "properties": { "cvss": "5.5", "priority": "P1" }
+        },
+        {
+          "ruleId": "gitui/unsigned-artifacts",
+          "level": "warning",
+          "message": { "text": "bundle.targets is 'all' with no macOS/Windows code-signing identity and no updater pubkey; CI passes no signing secrets. Distributed installers cannot be cryptographically verified. Configure platform signing. [P1; source: INFRA-009]" },
+          "locations": [ { "physicalLocation": { "artifactLocation": { "uri": "src-tauri/tauri.conf.json" }, "region": { "startLine": 27, "snippet": { "text": "\"targets\": \"all\"," } } } } ],
+          "properties": { "cvss": "5.9", "priority": "P1" }
+        },
+        {
+          "ruleId": "gitui/unpinned-actions",
+          "level": "warning",
+          "message": { "text": "actions/checkout@v4, actions/setup-node@v4, dtolnay/rust-toolchain@stable (branch), swatinem/rust-cache@v2 run unpinned in the privileged release job. Pin all to full commit SHAs. [P1; sources: INFRA-002..005]" },
+          "locations": [
+            { "physicalLocation": { "artifactLocation": { "uri": ".github/workflows/release.yml" }, "region": { "startLine": 36, "snippet": { "text": "uses: actions/checkout@v4" } } } },
+            { "physicalLocation": { "artifactLocation": { "uri": ".github/workflows/release.yml" }, "region": { "startLine": 50, "snippet": { "text": "uses: actions/setup-node@v4" } } } },
+            { "physicalLocation": { "artifactLocation": { "uri": ".github/workflows/release.yml" }, "region": { "startLine": 55, "snippet": { "text": "uses: dtolnay/rust-toolchain@stable" } } } },
+            { "physicalLocation": { "artifactLocation": { "uri": ".github/workflows/release.yml" }, "region": { "startLine": 61, "snippet": { "text": "uses: swatinem/rust-cache@v2" } } } }
+          ],
+          "properties": { "cvss": "6.5", "priority": "P1" }
+        },
+        {
+          "ruleId": "gitui/git-terminal-prompt",
+          "level": "note",
+          "message": { "text": "GIT_TERMINAL_PROMPT=0 only set on clone; network git ops can hang on credential prompts. Set it + transport guards in the central git() wrapper. [P2; source: DAST-009]" },
+          "locations": [ { "physicalLocation": { "artifactLocation": { "uri": "src-tauri/src/git/mod.rs" }, "region": { "startLine": 7, "snippet": { "text": "pub fn git(repo: &Path, args: &[&str]) -> Result<String> { ... proc::run(\"git\", ...) }" } } } } ],
+          "properties": { "cvss": "3.7", "priority": "P2" }
+        },
+        {
+          "ruleId": "gitui/git-editor-shell-string",
+          "level": "note",
+          "message": { "text": "GIT_SEQUENCE_EDITOR/GIT_EDITOR built as `cp '<temp>'` shell strings with unescaped single quotes. App-controlled path, so fragility not live injection. [P2; source: SAST-007]" },
+          "locations": [ { "physicalLocation": { "artifactLocation": { "uri": "src-tauri/src/git/mod.rs" }, "region": { "startLine": 271, "snippet": { "text": "let seq_editor = format!(\"cp '{}'\", todo_path...);" } } } } ],
+          "properties": { "cvss": "3.3", "priority": "P2" }
+        },
+        {
+          "ruleId": "gitui/no-rate-limiting",
+          "level": "note",
+          "message": { "text": "Process-global AI config has no provenance check and nothing throttles destructive ops; only reachable post-XSS. Add coalescing + native confirmation for bulk actions. [P2; source: DAST-008]" },
+          "locations": [ { "physicalLocation": { "artifactLocation": { "uri": "src-tauri/src/assist/mod.rs" }, "region": { "startLine": 89, "snippet": { "text": "pub(crate) fn ai_config() -> &'static Mutex<AiConfig> { static CFG: OnceLock<Mutex<AiConfig>> ... }" } } } } ],
+          "properties": { "cvss": "3.5", "priority": "P2" }
+        },
+        {
+          "ruleId": "gitui/ci-job-write-scope",
+          "level": "note",
+          "message": { "text": "contents: write granted job-wide across all 4 matrix runners. Add top-level permissions: contents: read and keep write only on the release-upload step. [P2; source: INFRA-007]" },
+          "locations": [ { "physicalLocation": { "artifactLocation": { "uri": ".github/workflows/release.yml" }, "region": { "startLine": 19, "snippet": { "text": "permissions:\n      contents: write" } } } } ],
+          "properties": { "cvss": "3.5", "priority": "P2" }
+        },
+        {
+          "ruleId": "gitui/ci-tagname-untrusted",
+          "level": "note",
+          "message": { "text": "tagName: ${{ github.ref_name }} is attacker-influenceable but used as a typed action input (no shell), so no injection. Optionally guard with a semver pattern. [P2; source: INFRA-008]" },
+          "locations": [ { "physicalLocation": { "artifactLocation": { "uri": ".github/workflows/release.yml" }, "region": { "startLine": 73, "snippet": { "text": "tagName: ${{ github.ref_name }}" } } } } ],
+          "properties": { "cvss": "2.5", "priority": "P2" }
+        },
+        {
+          "ruleId": "gitui/toctou-destructive-git",
+          "level": "note",
+          "message": { "text": "TOCTOU between is_dirty()/rebase checks and reset --hard / branch -f; low risk single-user, serialize repo-mutating commands behind a per-repo mutex if hardening. [P2; source: SAST-008]" },
+          "locations": [ { "physicalLocation": { "artifactLocation": { "uri": "src-tauri/src/undo/mod.rs" }, "region": { "startLine": 80, "snippet": { "text": "if git::is_dirty(repo) { return Err(...); } ... git::git(repo, &[\"reset\", \"--hard\", sha])?;" } } } } ],
+          "properties": { "cvss": "2.5", "priority": "P2" }
+        },
+        {
+          "ruleId": "gitui/dep-dagre-unmaintained",
+          "level": "note",
+          "message": { "text": "dagre@0.8.5 unmaintained (2022); migrate to @dagrejs/dagre. No CVE, client-side only. [P2; source: DEP-005]" },
+          "locations": [ { "physicalLocation": { "artifactLocation": { "uri": "package.json" }, "region": { "startLine": 20, "snippet": { "text": "\"dagre\": \"^0.8.5\"" } } } } ],
+          "properties": { "cvss": "2.0", "priority": "P2" }
+        },
+        {
+          "ruleId": "gitui/dep-gtk3-unmaintained",
+          "level": "note",
+          "message": { "text": "gtk3-rs stack (gtk/gdk/glib 0.18.x) unmaintained, RUSTSEC-2024-0413. Transitive, Linux-only, gated behind upstream gtk4 migration; suppress in cargo-audit. [P2; source: DEP-008]" },
+          "locations": [ { "physicalLocation": { "artifactLocation": { "uri": "src-tauri/Cargo.lock" }, "region": { "startLine": 1, "snippet": { "text": "[[package]] name = \"gtk\" version = \"0.18.x\"" } } } } ],
+          "properties": { "cvss": "2.5", "priority": "P2" }
+        },
+        {
+          "ruleId": "gitui/dep-proc-macro-error-unmaintained",
+          "level": "note",
+          "message": { "text": "proc-macro-error@1.0.4 unmaintained, RUSTSEC-2024-0370. Build-time-only transitive dep, not in the shipped binary. [P2; source: DEP-009]" },
+          "locations": [ { "physicalLocation": { "artifactLocation": { "uri": "src-tauri/Cargo.lock" }, "region": { "startLine": 1, "snippet": { "text": "[[package]] name = \"proc-macro-error\" version = \"1.0.4\"" } } } } ],
+          "properties": { "cvss": "2.0", "priority": "P2" }
+        },
+        {
+          "ruleId": "gitui/dep-glib-soundness",
+          "level": "note",
+          "message": { "text": "glib@0.18.5 soundness advisory RUSTSEC-2024-0429 (OOB read in VariantStrIter). Transitive, Linux-only, not exercised by app code; fix is glib >=0.20 (gtk4 migration). [P2; source: DEP-010]" },
+          "locations": [ { "physicalLocation": { "artifactLocation": { "uri": "src-tauri/Cargo.lock" }, "region": { "startLine": 1, "snippet": { "text": "[[package]] name = \"glib\" version = \"0.18.5\"" } } } } ],
+          "properties": { "cvss": "3.5", "priority": "P2" }
+        },
+        {
+          "ruleId": "gitui/cargo-audit-not-run",
+          "level": "note",
+          "message": { "text": "cargo-audit not installed — Rust dependency findings are a manual RUSTSEC cross-reference, not a live DB query. Install cargo-audit and add to CI for authoritative coverage. [P2; source: DEP-007]" },
+          "locations": [ { "physicalLocation": { "artifactLocation": { "uri": "src-tauri/Cargo.lock" }, "region": { "startLine": 1 } } } ],
+          "properties": { "cvss": "0.0", "priority": "P2" }
+        },
+        {
+          "ruleId": "gitui/markdown-rendering-safe",
+          "level": "note",
+          "message": { "text": "POSITIVE/WATCH: Markdown sinks use react-markdown v10 with no rehype-raw and no dangerouslySetInnerHTML, so untrusted HTML is escaped. Enforce this as an invariant (lint/test). [P2; source: DAST-010]" },
+          "locations": [ { "physicalLocation": { "artifactLocation": { "uri": "src/components/DocsView.tsx" }, "region": { "startLine": 211, "snippet": { "text": "<Markdown>{content}</Markdown>" } } } } ],
+          "properties": { "cvss": "0.0", "priority": "P2", "kind": "positive" }
+        },
+        {
+          "ruleId": "gitui/capabilities-minimal",
+          "level": "note",
+          "message": { "text": "POSITIVE: Tauri capabilities are minimal/least-privilege (no broad shell/fs/http, no dangerousRemoteDomainIpcAccess, no withGlobalTauri). See gitui/unscoped-opener for the one caveat. [P2; source: INFRA-011]" },
+          "locations": [ { "physicalLocation": { "artifactLocation": { "uri": "src-tauri/capabilities/default.json" }, "region": { "startLine": 6, "snippet": { "text": "\"permissions\": [ \"core:default\", \"opener:default\", \"dialog:default\", \"notification:default\" ]" } } } } ],
+          "properties": { "cvss": "0.0", "priority": "P2", "kind": "positive" }
+        },
+        {
+          "ruleId": "gitui/no-real-secrets",
+          "level": "note",
+          "message": { "text": "POSITIVE: No real secrets committed. ANTHROPIC_AUTH_TOKEN='ollama' is a placeholder; ${{ secrets.GITHUB_TOKEN }} is the managed CI token. No .env / private keys / updater signing key in the tree. [P2; sources: SEC-001, SEC-002]" },
+          "locations": [ { "physicalLocation": { "artifactLocation": { "uri": "src-tauri/src/assist/mod.rs" }, "region": { "startLine": 137, "snippet": { "text": "(\"ANTHROPIC_AUTH_TOKEN\".to_string(), \"ollama\".to_string())," } } } } ],
+          "properties": { "cvss": "0.0", "priority": "P2", "kind": "positive" }
+        }
+      ]
+    }
+  ]
+}

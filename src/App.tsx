@@ -48,14 +48,14 @@ import { CommitGraph } from "./components/CommitGraph";
 import { CommitFilter } from "./components/CommitFilter";
 import { BranchRow } from "./components/BranchRow";
 import { BranchDetail } from "./components/BranchDetail";
-import { CommitDetailPanel } from "./components/CommitDetailPanel";
+import { CommitPage } from "./components/CommitPage";
 import { NewBranchDialog, SetParentDialog, MergeBranchDialog } from "./components/BranchDialogs";
 import { ConflictPanel } from "./components/ConflictPanel";
 import { SubmitDialog } from "./components/SubmitDialog";
 import { RepoGraphView } from "./components/RepoGraphView";
 import { TerminalDock, type AnalyzeTarget } from "./components/TerminalDock";
 import { ChatDock } from "./components/ChatDock";
-import { PrDetailPanel } from "./components/PrDetailPanel";
+import { PrPage } from "./components/PrPage";
 import { IssuesList } from "./components/IssuesList";
 import { IssueDetailPanel } from "./components/IssueDetailPanel";
 import { PrList } from "./components/PrList";
@@ -464,6 +464,17 @@ export default function App() {
         setShowShortcuts(true);
         return;
       }
+      // Escape closes a full-page view (PR, then commit), back to the list/graph.
+      if (e.key === "Escape") {
+        if (inspectPr != null) {
+          setInspectPr(null);
+          return;
+        }
+        if (viewMode === "commits" && inspectCommit) {
+          setInspectCommit(null);
+          return;
+        }
+      }
       if (!selected || !view) return;
       switch (e.key) {
         case "1": setViewMode("graph"); break;
@@ -494,7 +505,7 @@ export default function App() {
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [selected, view, undoLabel, showPalette, showShortcuts]);
+  }, [selected, view, undoLabel, showPalette, showShortcuts, viewMode, inspectCommit, inspectPr]);
 
   // First launch ever: run the overview tour once, when the first repo is loaded
   // (so the spotlights have a real toolbar to point at). The welcome screen and the
@@ -704,10 +715,10 @@ export default function App() {
     "view-graph": [{ action: () => setViewMode("graph"), title: "Graphe des branches", body: "Voici ta pile. Glisse une branche sur une autre pour la re-parenter ; les pastilles montrent l'état (CI, review, retard…)." }],
     "view-commits": [{ action: () => setViewMode("commits"), selector: '[data-tour="commit-search"]', title: "Graphe des commits", body: "Le DAG des commits. Tape ici pour filtrer par message / sha / auteur." }],
     "commit-search": [{ action: () => setViewMode("commits"), selector: '[data-tour="commit-search"]', title: "Recherche de commits", body: "Tape : les commits non-matchés s'estompent et la vue se recentre sur les résultats." }],
-    "commit-ops": [{ action: () => setViewMode("commits"), title: "Actions de commit", body: "Clique un commit → panneau de détail : Summary/Detailed, AI Review, Cherry-pick, et au survol reword (IA) / drop / squash / move." }],
+    "commit-ops": [{ action: () => setViewMode("commits"), title: "Actions de commit", body: "Clique un commit → panneau de détail : Summary/Detailed, AI Review, Cherry-pick, et au survol reword (IA) / split / drop / squash / move." }],
     tree: [{ action: () => setViewMode("tree"), title: "Vue Tree", body: "La pile en liste. Survole une branche pour ses actions, clique-la pour le détail." }],
     "branch-ops": [{ action: () => setViewMode("tree"), title: "Actions de branche", body: "Survole une branche → checkout, set parent, restack, merge, track/untrack." }],
-    prs: [{ action: () => setViewMode("prs"), title: "Pull requests", body: "Ouvre une PR : Approuver / Changements / Commenter, checks CI + logs, AI Review." }],
+    prs: [{ action: () => setViewMode("prs"), title: "Pull requests", body: "Ouvre une PR : Approuver / Changements / Commenter, checks CI + logs, AI Review (postable en commentaires inline sur la PR)." }],
     issues: [{ action: () => setViewMode("issues"), title: "Issues", body: "La liste des issues et leur détail." }],
     docs: [{ action: () => setViewMode("docs"), title: "Docs", body: "Les fichiers Markdown du dépôt." }],
     views: [{ selector: '[data-tour="views"]', title: "Vues", body: "Clique pour changer de vue (ou les touches 1–6)." }],
@@ -722,17 +733,7 @@ export default function App() {
 
   const panel =
     selected &&
-    (inspectPr != null ? (
-      <PrDetailPanel
-        repoPath={selected}
-        number={inspectPr}
-        aiName={aiName}
-        onClose={() => setInspectPr(null)}
-        onAnalyze={(number, mode) =>
-          setTerminal({ repoPath: selected!, target: { kind: "pr", number }, mode })
-        }
-      />
-    ) : viewMode === "issues" ? (
+    (inspectPr != null ? null : viewMode === "issues" ? (
       inspectIssue != null && (
         <IssueDetailPanel
           repoPath={selected}
@@ -740,23 +741,7 @@ export default function App() {
           onClose={() => setInspectIssue(null)}
         />
       )
-    ) : viewMode === "commits" ? (
-      selectedCommit && (
-        <CommitDetailPanel
-          repoPath={selected}
-          node={selectedCommit}
-          aiName={aiName}
-          branches={view ? flattenBranches(view).map((b) => b.name) : []}
-          onClose={() => setInspectCommit(null)}
-          onAnalyze={(sha, mode) =>
-            setTerminal({ repoPath: selected!, target: { kind: "commit", sha }, mode })
-          }
-          onCherryPick={(sha, target) =>
-            selected && runMutation(api.cherryPick(selected, sha, target))
-          }
-        />
-      )
-    ) : viewMode === "graph" || viewMode === "tree" ? (
+    ) : viewMode === "commits" ? null : viewMode === "graph" || viewMode === "tree" ? (
       inspectedBranch && (
         <BranchDetail
           repoPath={selected}
@@ -1147,6 +1132,30 @@ export default function App() {
                 onOpenRepo={openRepo}
               />
             </div>
+          ) : inspectPr != null && selected && !switchingRepo ? (
+            <PrPage
+              repoPath={selected}
+              number={inspectPr}
+              aiName={aiName}
+              onClose={() => setInspectPr(null)}
+              onAnalyze={(number, mode) =>
+                setTerminal({ repoPath: selected!, target: { kind: "pr", number }, mode })
+              }
+            />
+          ) : viewMode === "commits" && selectedCommit && selected && !switchingRepo ? (
+            <CommitPage
+              repoPath={selected}
+              node={selectedCommit}
+              branches={view ? flattenBranches(view).map((b) => b.name) : []}
+              aiName={aiName}
+              onClose={() => setInspectCommit(null)}
+              onAnalyze={(sha, mode) =>
+                setTerminal({ repoPath: selected!, target: { kind: "commit", sha }, mode })
+              }
+              onCherryPick={(sha, target) =>
+                selected && runMutation(api.cherryPick(selected, sha, target))
+              }
+            />
           ) : (
             <>
               {/* View region */}

@@ -1,6 +1,7 @@
 mod assist;
 mod chat;
 mod commands;
+mod diff;
 mod docs;
 mod error;
 mod git;
@@ -56,6 +57,8 @@ pub fn run() {
             commands::drop_commit,
             commands::move_commit,
             commands::squash_commit,
+            commands::split_diff,
+            commands::split_commit,
             commands::cherry_pick,
             commands::stack_commits,
             commands::commit_detail,
@@ -63,6 +66,7 @@ pub fn run() {
             commands::analyze_commit,
             commands::pr_detail,
             commands::submit_pr_review,
+            commands::post_review_comments,
             commands::pr_checks,
             commands::review_pr,
             commands::review_commit,

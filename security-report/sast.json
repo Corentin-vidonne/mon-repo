@@ -1,0 +1,84 @@
+{
+  "findings": [
+    {
+      "id": "SAST-001",
+      "severity": "medium",
+      "title": "SSRF: Ollama host is fully user-controlled and unvalidated in ollama_models",
+      "file": "src-tauri/src/commands.rs",
+      "line": 96,
+      "snippet": "let url = format!(\"{base}/api/tags\"); ... agent.get(&url).call()",
+      "description": "The `ollama_models` Tauri command takes a `host: String` straight from the webview (SettingsModal -> api.ollamaModels) and uses it to build `<base>/api/tags`, then issues an HTTP GET via the `ureq` client with NO validation of scheme, host, or port. The IPC boundary accepts any value, so the request can be pointed at arbitrary internal endpoints (e.g. http://169.254.169.254/... cloud metadata, http://127.0.0.1:<port>/... loopback admin services, or any LAN host). Although the value normally comes from the user's own settings field, there is no allowlist (e.g. localhost/127.0.0.1 only) and the host is also persisted to settings and replayed on startup, so a tampered settings file silently turns the app into an SSRF proxy. The blast radius is limited because `ureq` is built with `default-features = false` (no TLS), so only plaintext http:// targets are reachable, and the response is only parsed for a `models[].name` list (limited exfil channel). For a desktop tool this is a real but moderate SSRF.",
+      "remediation": "Validate the host before use: parse it as a URL and reject anything that is not http(s) and not a loopback/private host the user explicitly opted into. Minimal example:\n\nfn validate_ollama_host(h: &str) -> Result<String> {\n    let u = url::Url::parse(h).map_err(|_| AppError::new(\"Hôte Ollama invalide\"))?;\n    if u.scheme() != \"http\" && u.scheme() != \"https\" { return Err(AppError::new(\"schéma non autorisé\")); }\n    match u.host_str() {\n        Some(\"localhost\") | Some(\"127.0.0.1\") | Some(\"::1\") => {}\n        _ => return Err(AppError::new(\"hôte Ollama doit être local\")),\n    }\n    Ok(u.to_string().trim_end_matches('/').to_string())\n}\n\nApply the same check in `set_ai_config`. At minimum, block link-local / metadata IPs (169.254.0.0/16, 100.64.0.0/10) and warn the user when configuring a non-local host."
+    },
+    {
+      "id": "SAST-002",
+      "severity": "medium",
+      "title": "Prompt/diff exfiltration: unvalidated Ollama host injected as ANTHROPIC_BASE_URL for every claude spawn",
+      "file": "src-tauri/src/assist/mod.rs",
+      "line": 136,
+      "snippet": "let mut env = vec![ (\"ANTHROPIC_BASE_URL\".to_string(), host), (\"ANTHROPIC_AUTH_TOKEN\".to_string(), \"ollama\".to_string()), (\"ANTHROPIC_API_KEY\".to_string(), String::new()), ];",
+      "description": "In Ollama mode, `ai_env()` takes the unvalidated `ollama_host` (set from the frontend via `set_ai_backend` -> `set_ai_config`) and injects it as `ANTHROPIC_BASE_URL` into every `claude` subprocess (run_claude_headless, pty_command, chat::spawn_turn). The prompts fed to claude embed sensitive repository content: full commit diffs (commit_review_prompt, analysis_prompt), PR diffs/titles/bodies (pr_review_prompt), and the raw contents of conflicted working-tree files including base/ours/theirs versions (conflict_resolution_prompt). Because the base URL is attacker-controllable via a tampered/poisoned settings value with no allowlist, all of this content can be redirected to an arbitrary plaintext HTTP endpoint, i.e. a data-exfiltration channel. This is the write-side companion to SAST-001 (SSRF read side).",
+      "remediation": "Reuse the host validation from SAST-001 inside `set_ai_config`/`ai_env` so `ANTHROPIC_BASE_URL` can only ever be a loopback/explicitly-trusted host. Consider surfacing a clear, persistent UI indicator when a non-default AI endpoint is configured, and refuse to spawn with a remote base URL unless the user has confirmed it. Do not silently honor a base URL loaded from persisted settings without re-validating it at startup."
+    },
+    {
+      "id": "SAST-003",
+      "severity": "medium",
+      "title": "Untrusted CI-check URL opened via OS opener without scheme validation",
+      "file": "src/components/PrPage.tsx",
+      "line": 489,
+      "snippet": "onClick={() => openUrl(c.link)}",
+      "description": "`PrPage` renders the per-check `link` returned by `gh pr checks --json ...,link` and opens it with `openUrl()` from @tauri-apps/plugin-opener when the user clicks the external-link icon. The `link` value originates from a Pull Request's CI status checks, which are attacker-influenceable: anyone who can open a PR / configure a check on a repository the user is reviewing controls this string. `openUrl` hands the value to the OS default handler with no scheme/host validation, so a non-https value (e.g. file://, or a registered custom-scheme/URI handler that triggers a local app) can be launched with one click in the reviewer's session. The other openUrl call sites (pr.url, issue.url, branch.pr.url, hard-coded docs links) use trusted GitHub/constant URLs and are lower risk; `c.link` is the repo-controlled one. Note `c.link` is a real path: src/components/PrPage.tsx.",
+      "remediation": "Validate before opening: only pass values that parse as http(s) URLs on github.com (or at least any https URL). Example:\n\nfunction safeOpen(raw: string) {\n  try {\n    const u = new URL(raw);\n    if (u.protocol !== 'https:' && u.protocol !== 'http:') return;\n    openUrl(u.toString());\n  } catch { /* ignore non-URLs */ }\n}\n\nUse `safeOpen(c.link)` here (and ideally for every openUrl that comes from gh/git output). Also scope the opener capability to https where possible."
+    },
+    {
+      "id": "SAST-004",
+      "severity": "medium",
+      "title": "Argument injection into `git clone <url>` (no `--` separator, leading-dash URLs accepted)",
+      "file": "src-tauri/src/commands.rs",
+      "line": 193,
+      "snippet": "let r = proc::run_env(\"git\", [\"clone\", url, target_str.as_str()], Some(parent), &[(\"GIT_TERMINAL_PROMPT\", \"0\")]);",
+      "description": "`clone_repo` passes the frontend-supplied `url` directly as a positional argument to `git clone` with no `--` end-of-options separator and no rejection of values beginning with `-`. A value like `--upload-pack=<cmd>` (or other clone options) is then interpreted by git as a flag rather than a URL, which is the classic git argument-injection vector and can lead to local command execution (e.g. via `--upload-pack`/`--config core.fsmonitor=...` style tricks, or the `ext::sh -c \"...\"` transport when remote-ext is allowed). Spawning is done via argv (no shell), so this is argument injection, not shell injection, but it is still dangerous. Real-world reachability is moderate: the user pastes the clone URL themselves in AddRepoDialog, so it mainly matters when a malicious URL is copied from an untrusted source; git's default protocol allowlist mitigates the `ext::` path since git >= 2.12.",
+      "remediation": "Insert an explicit options terminator and reject leading-dash inputs:\n\nif url.starts_with('-') { return Err(AppError::new(\"URL invalide\")); }\nlet r = proc::run_env(\"git\", [\"clone\", \"--\", url, target_str.as_str()], Some(parent), &[(\"GIT_TERMINAL_PROMPT\", \"0\"), (\"GIT_ALLOW_PROTOCOL\", \"https:ssh:git\")]);\n\nThe `GIT_ALLOW_PROTOCOL` allowlist additionally neutralizes `ext::`/`file::` style transports."
+    },
+    {
+      "id": "SAST-005",
+      "severity": "low",
+      "title": "Argument injection: branch names / cherry-pick SHA / refs passed to git without `--`",
+      "file": "src-tauri/src/git/mod.rs",
+      "line": 173,
+      "snippet": "git(repo, &[\"checkout\", \"-b\", name, start])?;   // create_branch; also cherry_pick: git(repo, &[\"cherry-pick\", &sha]) and push(repo, branch)",
+      "description": "Several commands forward user-controlled identifiers as positional git arguments with no `--` separator: `create_branch`/`set_parent` (branch name -> `git checkout -b <name>`, `git branch ...`, `git push ... <branch>`), `cherry_pick` (`git cherry-pick <sha>`), and the meta/config writers. `create_branch` only rejects names containing whitespace (commands.rs ~line 225) — it does NOT reject a name beginning with `-`. A branch/ref literally named like an option (e.g. `--output`, `-x`) could be parsed as a flag by some git subcommands. Exploitability is low: git itself rejects most ref names that begin with `-` (refname rules), the values are typed by the local user, and all spawns are argv-based (no shell). It is still good hygiene to terminate options and validate names.",
+      "remediation": "Add `--` before positional names/refs in the git argument vectors (e.g. `[\"checkout\", \"-b\", name, \"--\", start]` is not valid for checkout, so instead validate the name) and validate user-supplied branch names: reject empty, whitespace, leading '-', and characters disallowed by `git check-ref-format`. For `cherry_pick`, use `git(repo, &[\"cherry-pick\", \"--\", &sha])` is not supported; instead resolve the sha with `rev-parse --verify` first and reject anything that doesn't resolve to a commit object (the commit-editing paths already do this via resolve_on_branch — apply the same to cherry_pick's `sha`)."
+    },
+    {
+      "id": "SAST-006",
+      "severity": "low",
+      "title": "Content-Security-Policy disabled (csp: null) in Tauri config",
+      "file": "src-tauri/tauri.conf.json",
+      "line": 23,
+      "snippet": "\"security\": { \"csp\": null }",
+      "description": "The Tauri webview ships with no Content-Security-Policy (`\"csp\": null`). The app renders a large amount of untrusted text — AI/Claude output, GitHub PR/issue bodies, comments, reviews, commit messages and diffs. Today these are rendered safely (react-markdown v10 with default config, i.e. no rehype-raw and built-in URL sanitization; untrusted bodies are shown in plain-text <pre> blocks), so there is no active XSS. However, with CSP disabled there is no defense-in-depth: if any future change introduces a raw-HTML sink (rehype-raw, dangerouslySetInnerHTML, a custom markdown `a`/`img` renderer, etc.) it would immediately become exploitable, and injected content could load remote scripts/styles or exfiltrate via fetch/img. This is a hardening gap rather than a live vulnerability.",
+      "remediation": "Set a restrictive CSP in tauri.conf.json, e.g.:\n\n\"security\": { \"csp\": \"default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost; object-src 'none'; base-uri 'none'; frame-ancestors 'none'\" }\n\nTune `connect-src`/`img-src` to what the app actually needs. Keeping react-markdown without rehype-raw remains the primary control; CSP is the safety net."
+    },
+    {
+      "id": "SAST-007",
+      "severity": "low",
+      "title": "Shell-interpreted GIT_EDITOR / GIT_SEQUENCE_EDITOR strings built by string interpolation",
+      "file": "src-tauri/src/git/mod.rs",
+      "line": 271,
+      "snippet": "let seq_editor = format!(\"cp '{}'\", todo_path.to_string_lossy().replace('\\\\', \"/\"));",
+      "description": "`rebase_edit` drives a non-interactive `git rebase -i` by setting GIT_SEQUENCE_EDITOR/GIT_EDITOR to `cp '<temp_path>'` strings (lines 271 and 282). git executes these through its own `sh`, so the value is a shell command line. The interpolated path is single-quoted with backslashes converted to forward slashes, but single quotes inside the path are NOT escaped. The path is constructed by the app from `std::env::temp_dir()` + a fixed `gitui-todo-<pid>-<n>.txt` name, so it is not directly attacker-controlled — exploitation would require the OS temp directory itself to contain a single-quote character, which is not user-reachable through the IPC surface. This is therefore a fragility/defense-in-depth issue, not a live injection. Flagged because building shell command strings (vs. argv) for git editors is the kind of pattern that becomes injectable if the path source ever changes.",
+      "remediation": "Avoid the shell entirely: point GIT_SEQUENCE_EDITOR/GIT_EDITOR at a tiny helper invoked without quoting, or use a cross-platform 'replace file with ours' that git invokes directly. If keeping `cp`, escape embedded single quotes in the POSIX-safe way (replace `'` with `'\\''`) before interpolation, and assert the temp path contains no quote/newline characters."
+    },
+    {
+      "id": "SAST-008",
+      "severity": "info",
+      "title": "TOCTOU between is_dirty()/rebase checks and destructive git operations",
+      "file": "src-tauri/src/undo/mod.rs",
+      "line": 80,
+      "snippet": "if git::is_dirty(repo) { return Err(...); } ... git::git(repo, &[\"reset\", \"--hard\", sha])?;",
+      "description": "Multiple command handlers guard destructive operations with a prior check (`is_dirty`, `rebase_in_progress`) and then run `git reset --hard` / `git branch -f` / rebase (undo::restore, restack, sync, commit-editing). Between the check and the mutation the working tree could change (another process, the embedded PTY running claude, or a concurrent IPC call), so a `reset --hard` could discard changes that appeared after the dirty check passed. Similarly, the process-global singletons `undo::global()` (OnceLock<Mutex<..>>) and `assist::ai_config()` are individually locked per access; there is no atomicity across a check-then-act sequence. For a single-user, single-window desktop app the practical risk is low (the user drives one action at a time), but concurrent AI/terminal activity against the same repo makes the window non-zero.",
+      "remediation": "These are inherent to shelling out to git and are acceptable for the desktop threat model; document the assumption. If hardening is desired, serialize all repo-mutating commands behind a per-repo mutex (so a clone/restack/undo cannot interleave with a PTY-driven git write), and prefer `git stash --include-untracked` or refusing on any change rather than `reset --hard` where data loss is possible."
+    }
+  ]
+}

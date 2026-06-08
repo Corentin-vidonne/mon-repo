@@ -91,6 +91,43 @@ pub(crate) fn ai_config() -> &'static Mutex<AiConfig> {
     CFG.get_or_init(|| Mutex::new(AiConfig::default()))
 }
 
+/// Default Ollama endpoint (loopback), used when none or an invalid host is configured.
+pub(crate) const DEFAULT_OLLAMA_HOST: &str = "http://localhost:11434";
+
+/// Validate & normalize a user-supplied Ollama host before it is queried (`ollama_models`)
+/// or injected as `ANTHROPIC_BASE_URL` into every spawned `claude`. Rejects non-http(s)
+/// schemes and SSRF / cloud-metadata targets (link-local `169.254.0.0/16`, `0.0.0.0`,
+/// broadcast). Loopback, LAN and public hosts are allowed — the user may legitimately run
+/// Ollama elsewhere — so this denies the dangerous ranges rather than locking to loopback.
+pub(crate) fn validate_ollama_host(raw: &str) -> Result<String> {
+    let raw = raw.trim();
+    if raw.is_empty() {
+        return Ok(DEFAULT_OLLAMA_HOST.to_string());
+    }
+    let u = url::Url::parse(raw)
+        .map_err(|_| AppError::new("Hôte Ollama invalide (URL malformée)."))?;
+    if !matches!(u.scheme(), "http" | "https") {
+        return Err(AppError::new("Hôte Ollama : seuls les schémas http/https sont autorisés."));
+    }
+    let host = u
+        .host_str()
+        .ok_or_else(|| AppError::new("Hôte Ollama : nom d'hôte manquant."))?;
+    if let Ok(ip) = host.parse::<std::net::IpAddr>() {
+        let blocked = match ip {
+            std::net::IpAddr::V4(v4) => {
+                v4.is_link_local() || v4.is_unspecified() || v4.is_broadcast()
+            }
+            std::net::IpAddr::V6(v6) => v6.is_unspecified(),
+        };
+        if blocked {
+            return Err(AppError::new(
+                "Hôte Ollama : adresse non autorisée (lien-local / métadonnées cloud).",
+            ));
+        }
+    }
+    Ok(u.as_str().trim_end_matches('/').to_string())
+}
+
 /// Update the global config from the frontend (`anthropic` or `ollama`).
 pub(crate) fn set_ai_config(
     backend: &str,
@@ -104,47 +141,57 @@ pub(crate) fn set_ai_config(
     } else {
         AiBackend::Anthropic
     };
-    cfg.ollama_host = ollama_host;
+    // Never store a dangerous host: an invalid value falls back to loopback so it can't be
+    // used as an SSRF target or a plaintext-exfiltration sink (see `validate_ollama_host`).
+    cfg.ollama_host =
+        validate_ollama_host(&ollama_host).unwrap_or_else(|_| DEFAULT_OLLAMA_HOST.to_string());
     cfg.ollama_model = ollama_model;
     cfg.anthropic_model = anthropic_model;
 }
 
-/// Environment variables to inject when launching `claude`. Anthropic mode adds none (the
-/// user's own login/config applies). Ollama mode points `claude` at the local server and
-/// pins both the main and the small/fast model to the chosen local model — otherwise
-/// Claude Code's background calls would try (and fail) to reach Anthropic.
+/// Environment variables to inject when launching `claude` (applied by all three funnels).
+/// Always includes git-hardening vars: `claude` reads untrusted repos/PRs, and its pre-
+/// allowed "read-only" git tools (`git show/log/diff`) can otherwise be steered — e.g. an
+/// `ext::` URL in a hostile `.gitmodules` — into running a command. `GIT_CONFIG_*` has higher
+/// precedence than the repo's own config, so a malicious cloned repo can't re-enable these.
+/// On top of that, Ollama mode points `claude` at the (validated) local server and pins both
+/// the main and the small/fast model — otherwise Claude Code's background calls would try
+/// (and fail) to reach Anthropic. Anthropic mode adds only `ANTHROPIC_MODEL` when chosen.
 pub(crate) fn ai_env() -> Vec<(String, String)> {
     let cfg = ai_config().lock().unwrap().clone();
+    let mut env = vec![
+        ("GIT_TERMINAL_PROMPT".to_string(), "0".to_string()),
+        ("GIT_CONFIG_COUNT".to_string(), "2".to_string()),
+        ("GIT_CONFIG_KEY_0".to_string(), "core.pager".to_string()),
+        ("GIT_CONFIG_VALUE_0".to_string(), "cat".to_string()),
+        ("GIT_CONFIG_KEY_1".to_string(), "protocol.ext.allow".to_string()),
+        ("GIT_CONFIG_VALUE_1".to_string(), "never".to_string()),
+    ];
     match cfg.backend {
         AiBackend::Anthropic => {
             // Override only the main model when chosen; leave the small/fast model as the
             // account default (no reason to pay big-model cost for background calls). Empty
             // means Claude Code's own default model.
             let model = cfg.anthropic_model.trim();
-            if model.is_empty() {
-                Vec::new()
-            } else {
-                vec![("ANTHROPIC_MODEL".to_string(), model.to_string())]
+            if !model.is_empty() {
+                env.push(("ANTHROPIC_MODEL".to_string(), model.to_string()));
             }
         }
         AiBackend::Ollama => {
-            let host = {
-                let h = cfg.ollama_host.trim().trim_end_matches('/');
-                if h.is_empty() { "http://localhost:11434" } else { h }.to_string()
-            };
-            let mut env = vec![
-                ("ANTHROPIC_BASE_URL".to_string(), host),
-                ("ANTHROPIC_AUTH_TOKEN".to_string(), "ollama".to_string()),
-                ("ANTHROPIC_API_KEY".to_string(), String::new()),
-            ];
+            // Re-validate defensively (set_ai_config already stores only safe hosts).
+            let host = validate_ollama_host(&cfg.ollama_host)
+                .unwrap_or_else(|_| DEFAULT_OLLAMA_HOST.to_string());
+            env.push(("ANTHROPIC_BASE_URL".to_string(), host));
+            env.push(("ANTHROPIC_AUTH_TOKEN".to_string(), "ollama".to_string()));
+            env.push(("ANTHROPIC_API_KEY".to_string(), String::new()));
             let model = cfg.ollama_model.trim();
             if !model.is_empty() {
                 env.push(("ANTHROPIC_MODEL".to_string(), model.to_string()));
                 env.push(("ANTHROPIC_SMALL_FAST_MODEL".to_string(), model.to_string()));
             }
-            env
         }
     }
+    env
 }
 
 /// The prompt injected into `claude` to analyze a commit.
@@ -545,6 +592,25 @@ pub fn launch_claude(repo: &Path, prompt: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_ollama_host_allows_local_and_blocks_ssrf() {
+        // Empty falls back to the loopback default.
+        assert_eq!(validate_ollama_host("").unwrap(), DEFAULT_OLLAMA_HOST);
+        // Loopback, LAN and public hosts are allowed (trailing slash trimmed).
+        assert_eq!(
+            validate_ollama_host("http://localhost:11434/").unwrap(),
+            "http://localhost:11434"
+        );
+        assert!(validate_ollama_host("http://192.168.1.50:11434").is_ok());
+        assert!(validate_ollama_host("https://ollama.example.com").is_ok());
+        // SSRF / cloud-metadata targets and bogus inputs are rejected.
+        assert!(validate_ollama_host("http://169.254.169.254/latest/meta-data").is_err());
+        assert!(validate_ollama_host("http://0.0.0.0:11434").is_err());
+        assert!(validate_ollama_host("file:///etc/passwd").is_err());
+        assert!(validate_ollama_host("ftp://example.com").is_err());
+        assert!(validate_ollama_host("not a url").is_err());
+    }
 
     #[test]
     fn merge_prompt_adapts_to_stack_position() {

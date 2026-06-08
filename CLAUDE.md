@@ -96,4 +96,6 @@ models that `/api/tags` omits) with `GET <host>/api/tags` (local, via the tiny `
   checked at point of use**, not at startup: `assist::ensure_claude_available()` guards the
   three AI funnels (`run_claude_headless`, `pty_command`, `chat::spawn_turn`) and returns a
   friendly install message if `claude` is absent. Installers are built per-OS by
-  `.github/workflows/release.yml` (tauri-action).
+  `.github/workflows/release.yml` (tauri-action), plus a native Arch/EndeavourOS
+  `.pkg.tar.zst` built in an `archlinux` container via `makepkg` + `packaging/arch/PKGBUILD`
+  (wraps the prebuilt `--no-bundle` binary; attached to the same draft release with `gh`).

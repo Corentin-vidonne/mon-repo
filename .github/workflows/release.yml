@@ -4,6 +4,7 @@
 # Actions tab. Produces a *draft* GitHub Release with the per-platform bundles attached:
 #   - macOS:   .dmg / .app           (aarch64 + x86_64)
 #   - Linux:   .AppImage / .deb / .rpm
+#   - Arch:    .pkg.tar.zst          (EndeavourOS & Arch-based, native pacman package)
 #   - Windows: .msi / .exe (NSIS)
 # Review the draft, then publish it.
 name: release
@@ -13,6 +14,11 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
+
+# Least privilege by default; the build job below opts into `contents: write` for the
+# release upload.
+permissions:
+  contents: read
 
 jobs:
   build:
@@ -33,7 +39,10 @@ jobs:
 
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      # All third-party actions are pinned to a full commit SHA (supply-chain hardening);
+      # the trailing comment is the human-readable tag. Dependabot (.github/dependabot.yml)
+      # keeps these current.
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       # Tauri v2 system libraries (Linux only).
       - name: Install Linux dependencies
@@ -47,18 +56,18 @@ jobs:
             patchelf
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: lts/*
 
       - name: Install Rust stable
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@29eef336d9b2848a0b548edc03f92a220660cdb8 # stable branch, pinned
         with:
           # Both macOS arches need their target installed; harmless elsewhere.
           targets: ${{ matrix.platform == 'macos-latest' && 'aarch64-apple-darwin,x86_64-apple-darwin' || '' }}
 
       - name: Cache Rust build
-        uses: swatinem/rust-cache@v2
+        uses: swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
         with:
           workspaces: ./src-tauri -> target
 
@@ -66,7 +75,7 @@ jobs:
         run: npm install
 
       - name: Build & bundle
-        uses: tauri-apps/tauri-action@v0
+        uses: tauri-apps/tauri-action@84b9d35b5fc46c1e45415bdb6144030364f7ebc5 # v0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
@@ -76,3 +85,67 @@ jobs:
           releaseDraft: true
           prerelease: false
           args: ${{ matrix.args }}
+
+  # EndeavourOS / Arch Linux native package (.pkg.tar.zst).
+  #
+  # Arch can't install the .deb/.rpm produced above, so we build a real pacman package
+  # inside an Arch container: compile the release binary, then wrap the prebuilt artifacts
+  # with packaging/arch/PKGBUILD via makepkg (which refuses to run as root — hence the
+  # throwaway `builder` user). `needs: build` guarantees the draft release already exists,
+  # so we just attach the package to it with `gh`.
+  arch:
+    needs: build
+    permissions:
+      contents: write
+    runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
+    steps:
+      # git must be present before checkout so it clones (vs. the tarball fallback);
+      # rust/nodejs/npm + the Tauri v2 system libs cover the actual build.
+      - name: Install Arch build dependencies
+        run: |
+          pacman -Syu --noconfirm --needed \
+            base-devel git rust nodejs npm \
+            webkit2gtk-4.1 gtk3 librsvg openssl \
+            github-cli
+
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Install frontend dependencies
+        run: npm install
+
+      # `--no-bundle`: we only need the release binary (src-tauri/target/release/gitui);
+      # makepkg does the Arch packaging below. Avoids pulling in AppImage/deb/rpm tooling.
+      - name: Build binary
+        run: npx tauri build --no-bundle
+
+      - name: Build pacman package
+        run: |
+          set -eux
+          version="$(node -p "require('./src-tauri/tauri.conf.json').version")"
+          workdir="$(mktemp -d)"
+
+          # Stage PKGBUILD + the prebuilt artifacts it installs ($startdir in package()).
+          cp packaging/arch/PKGBUILD packaging/arch/gitui.desktop "$workdir/"
+          cp src-tauri/target/release/gitui "$workdir/gitui"
+          cp -r src-tauri/icons "$workdir/icons"
+
+          sed -i "s|^pkgver=.*|pkgver=${version}|" "$workdir/PKGBUILD"
+          sed -i "s|^url=.*|url=\"${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}\"|" "$workdir/PKGBUILD"
+
+          # makepkg won't run as root; build the package as an unprivileged user.
+          # --nodeps: runtime depends() aren't needed just to wrap prebuilt files.
+          useradd -m -s /bin/bash builder
+          chown -R builder:builder "$workdir"
+          runuser -u builder -- bash -c "cd '$workdir' && makepkg -f --nodeps"
+
+          mkdir -p arch-dist
+          cp "$workdir"/*.pkg.tar.zst arch-dist/
+
+      - name: Attach package to the draft release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release upload "$GITHUB_REF_NAME" arch-dist/*.pkg.tar.zst \
+            --clobber -R "$GITHUB_REPOSITORY"

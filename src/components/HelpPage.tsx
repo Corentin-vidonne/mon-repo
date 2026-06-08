@@ -110,6 +110,7 @@ export function HelpPage({
             onTest={onTest}
             items={[
               { id: "commit-ops", name: "Reword", desc: "ré-écrire le message (génération IA ✨)" },
+              { id: "commit-ops", name: "Split", desc: "découper un commit en deux, par fichier" },
               { id: "commit-ops", name: "Drop / Squash / Move", desc: "supprimer, fusionner, réordonner" },
               { id: "commit-ops", name: "Cherry-pick", desc: "appliquer un commit sur une autre branche" },
               { id: "commit-ops", name: "AI Review", desc: "relecture structurée d'un commit" },

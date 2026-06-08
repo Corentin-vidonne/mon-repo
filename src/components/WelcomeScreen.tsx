@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { openUrl } from "@tauri-apps/plugin-opener";
+import { safeOpen } from "../lib/safeOpen";
 import {
   Layers,
   Sparkles,
@@ -106,7 +106,7 @@ export function WelcomeScreen({ onFinish }: { onFinish: (startTour: boolean) => 
                     </div>
                   </div>
                   <button
-                    onClick={() => openUrl(CLAUDE_DOCS)}
+                    onClick={() => safeOpen(CLAUDE_DOCS)}
                     className="inline-flex shrink-0 items-center gap-1 rounded-md bg-indigo-600 px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-indigo-500"
                   >
                     Installer <ExternalLink className="h-3 w-3" />
@@ -122,7 +122,7 @@ export function WelcomeScreen({ onFinish }: { onFinish: (startTour: boolean) => 
                     </div>
                   </div>
                   <button
-                    onClick={() => openUrl(OLLAMA_DOWNLOAD)}
+                    onClick={() => safeOpen(OLLAMA_DOWNLOAD)}
                     className="inline-flex shrink-0 items-center gap-1 rounded-md bg-emerald-600 px-2.5 py-1.5 text-[11px] font-medium text-white hover:bg-emerald-500"
                   >
                     Installer <ExternalLink className="h-3 w-3" />

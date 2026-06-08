@@ -30,6 +30,11 @@ serde_json = "1"
 toml = "0.8"
 portable-pty = "0.8"
 base64 = "0.22"
-# Tiny HTTP client (no TLS — localhost only) to query Ollama's /api/tags for model detection.
+# Tiny HTTP client to query Ollama's /api/tags for model detection. No TLS (avoids a C
+# toolchain dep): in normal use the host is loopback — Ollama *cloud* models are proxied by
+# the local daemon — and the user-supplied host is validated against SSRF / metadata targets
+# in `assist::validate_ollama_host` before any request.
 ureq = { version = "2", default-features = false }
+# URL parsing/validation for the user-supplied Ollama host (SSRF / exfiltration guard).
+url = "2"
 
